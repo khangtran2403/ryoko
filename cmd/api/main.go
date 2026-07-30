@@ -9,6 +9,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/khangtran2403/ryoko/internal/config"
 	"github.com/khangtran2403/ryoko/internal/db/sqlc"
+	"github.com/khangtran2403/ryoko/internal/handler"
 )
 
 func main() {
@@ -27,15 +28,17 @@ func main() {
 	}
 
 	queries := sqlc.New(pool)
+        
+	hotelHandler := handler.NewHotelHandler(queries)
 
     mux := http.NewServeMux()
 	mux.HandleFunc("GET /health",func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte("OK"))
 	})
+	mux.HandleFunc("POST /hotels", hotelHandler.Create)
     
-	_ = queries 
-    addr := ":" + strconv.Itoa(cfg.API.Port)
+	addr := ":" + strconv.Itoa(cfg.API.Port)
 	log.Printf("listening on %s", addr)
 	log.Fatal(http.ListenAndServe(addr, mux))
 }
