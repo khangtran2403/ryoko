@@ -2,9 +2,12 @@ package handler
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
+	"strconv"
 	"strings"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/khangtran2403/ryoko/internal/db/sqlc"
 )
@@ -67,7 +70,53 @@ func (h *HotelHandler) Create(w http.ResponseWriter,r *http.Request)  {
    w.WriteHeader(http.StatusCreated)
    json.NewEncoder(w).Encode(c)
 }
+func (h *HotelHandler) GetByID(w http.ResponseWriter,r *http.Request) {
+    getId := r.PathValue("id")
+	if getId == "" {
+		http.Error(w, "Missing hotel ID", http.StatusBadRequest)
+		return
+	}
+	convId, err := strconv.ParseInt(getId, 10, 64)
+	if err != nil {
+		http.Error(w, "invalid hotel id", http.StatusBadRequest)
+		return
+	}
 
+	getHotel, err := h.queries.GetHotelByID(r.Context(),convId)
+	if errors.Is(err, pgx.ErrNoRows) {
+		http.Error(w, "Hotel not found", http.StatusNotFound)
+		return
+	}
+	if err != nil {
+		http.Error(w, "failed to fetch hotel", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(getHotel)
+}
+func (h *HotelHandler) ListHotelsByCity(w http.ResponseWriter,r *http.Request) {
+   c := r.URL.Query().Get("city")
+   if c == "" {
+		http.Error(w, "Missing city", http.StatusBadRequest)
+		return
+	}
+	hotels, err := h.queries.ListHotelsByCity(r.Context(), c)
+	if err != nil {
+		http.Error(w, "failed to list hotels", http.StatusInternalServerError)
+		return
+
+	}
+	// hotels is []Hotel{} (empty, not nil-error) when there are zero matches
+	// that's a valid 200 with an empty array, not a 404.
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(hotels)
+}
+// stringToPgText converts a plain (possibly empty) Go string into pgx's
+// nullable text type. Empty string is treated as NULL, not as an empty
+// stored value.
 func PgtypeconvertToString(s string) pgtype.Text {
 	if s == ""{
 		return pgtype.Text{Valid: false}

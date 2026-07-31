@@ -37,6 +37,8 @@ func main() {
 		w.Write([]byte("OK"))
 	})
 	mux.HandleFunc("POST /hotels", hotelHandler.Create)
+	mux.HandleFunc("GET /hotels/{id}", hotelHandler.GetByID)
+	mux.HandleFunc("GET /hotels", hotelHandler.ListHotelsByCity)
     
 	addr := ":" + strconv.Itoa(cfg.API.Port)
 	log.Printf("listening on %s", addr)
