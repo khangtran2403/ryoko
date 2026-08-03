@@ -30,7 +30,7 @@ func main() {
 	queries := sqlc.New(pool)
         
 	hotelHandler := handler.NewHotelHandler(queries)
-
+    roomTypeHandler := handler.NewRoomTypeHandler(queries)
     mux := http.NewServeMux()
 	mux.HandleFunc("GET /health",func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
@@ -39,6 +39,9 @@ func main() {
 	mux.HandleFunc("POST /hotels", hotelHandler.Create)
 	mux.HandleFunc("GET /hotels/{id}", hotelHandler.GetByID)
 	mux.HandleFunc("GET /hotels", hotelHandler.ListHotelsByCity)
+	mux.HandleFunc("POST /hotels/{hotelID}/room-types", roomTypeHandler.CreateRoomType)
+    mux.HandleFunc("GET /room-types/{id}", roomTypeHandler.GetRoomTypeByID)
+    mux.HandleFunc("GET /hotels/{hotelID}/room-types", roomTypeHandler.ListRoomTypesByHotel)
     
 	addr := ":" + strconv.Itoa(cfg.API.Port)
 	log.Printf("listening on %s", addr)

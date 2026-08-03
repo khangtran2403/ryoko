@@ -16,3 +16,14 @@ type Hotel struct {
 	Description pgtype.Text        `json:"description"`
 	CreatedAt   pgtype.Timestamptz `json:"created_at"`
 }
+
+type RoomType struct {
+	ID            int64              `json:"id"`
+	HotelID       int64              `json:"hotel_id"`
+	Name          string             `json:"name"`
+	Description   pgtype.Text        `json:"description"`
+	PricePerNight pgtype.Numeric     `json:"price_per_night"`
+	Capacity      int32              `json:"capacity"`
+	TotalRooms    int32              `json:"total_rooms"`
+	CreatedAt     pgtype.Timestamptz `json:"created_at"`
+}
