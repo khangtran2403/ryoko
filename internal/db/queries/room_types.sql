@@ -11,3 +11,19 @@ WHERE id = $1;
 SELECT * FROM room_types
 WHERE hotel_id = $1
 ORDER BY price_per_night;
+
+-- name: UpdateRoomType :one
+UPDATE room_types
+SET
+    name = $2,
+    description = $3,
+    price_per_night = $4,
+    capacity = $5,
+    total_rooms = $6
+WHERE id = $1
+RETURNING *;
+
+-- name: DeleteRoomType :one
+DELETE FROM room_types
+WHERE id = $1
+RETURNING id;

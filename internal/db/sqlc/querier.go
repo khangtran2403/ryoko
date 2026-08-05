@@ -11,10 +11,14 @@ import (
 type Querier interface {
 	CreateHotel(ctx context.Context, arg CreateHotelParams) (Hotel, error)
 	CreateRoomType(ctx context.Context, arg CreateRoomTypeParams) (RoomType, error)
+	DeleteHotel(ctx context.Context, id int64) (int64, error)
+	DeleteRoomType(ctx context.Context, id int64) (int64, error)
 	GetHotelByID(ctx context.Context, id int64) (Hotel, error)
 	GetRoomTypeByID(ctx context.Context, id int64) (RoomType, error)
 	ListHotelsByCity(ctx context.Context, city string) ([]Hotel, error)
 	ListRoomTypesByHotel(ctx context.Context, hotelID int64) ([]RoomType, error)
+	UpdateHotel(ctx context.Context, arg UpdateHotelParams) (Hotel, error)
+	UpdateRoomType(ctx context.Context, arg UpdateRoomTypeParams) (RoomType, error)
 }
 
 var _ Querier = (*Queries)(nil)

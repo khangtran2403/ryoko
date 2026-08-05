@@ -49,6 +49,19 @@ func (q *Queries) CreateRoomType(ctx context.Context, arg CreateRoomTypeParams) 
 	return i, err
 }
 
+const deleteRoomType = `-- name: DeleteRoomType :one
+DELETE FROM room_types
+WHERE id = $1
+RETURNING id
+`
+
+func (q *Queries) DeleteRoomType(ctx context.Context, id int64) (int64, error) {
+	row := q.db.QueryRow(ctx, deleteRoomType, id)
+	var id_2 int64
+	err := row.Scan(&id_2)
+	return id_2, err
+}
+
 const getRoomTypeByID = `-- name: GetRoomTypeByID :one
 SELECT id, hotel_id, name, description, price_per_night, capacity, total_rooms, created_at FROM room_types
 WHERE id = $1
@@ -103,4 +116,48 @@ func (q *Queries) ListRoomTypesByHotel(ctx context.Context, hotelID int64) ([]Ro
 		return nil, err
 	}
 	return items, nil
+}
+
+const updateRoomType = `-- name: UpdateRoomType :one
+UPDATE room_types
+SET
+    name = $2,
+    description = $3,
+    price_per_night = $4,
+    capacity = $5,
+    total_rooms = $6
+WHERE id = $1
+RETURNING id, hotel_id, name, description, price_per_night, capacity, total_rooms, created_at
+`
+
+type UpdateRoomTypeParams struct {
+	ID            int64          `json:"id"`
+	Name          string         `json:"name"`
+	Description   pgtype.Text    `json:"description"`
+	PricePerNight pgtype.Numeric `json:"price_per_night"`
+	Capacity      int32          `json:"capacity"`
+	TotalRooms    int32          `json:"total_rooms"`
+}
+
+func (q *Queries) UpdateRoomType(ctx context.Context, arg UpdateRoomTypeParams) (RoomType, error) {
+	row := q.db.QueryRow(ctx, updateRoomType,
+		arg.ID,
+		arg.Name,
+		arg.Description,
+		arg.PricePerNight,
+		arg.Capacity,
+		arg.TotalRooms,
+	)
+	var i RoomType
+	err := row.Scan(
+		&i.ID,
+		&i.HotelID,
+		&i.Name,
+		&i.Description,
+		&i.PricePerNight,
+		&i.Capacity,
+		&i.TotalRooms,
+		&i.CreatedAt,
+	)
+	return i, err
 }

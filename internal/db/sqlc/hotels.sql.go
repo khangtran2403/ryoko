@@ -43,6 +43,19 @@ func (q *Queries) CreateHotel(ctx context.Context, arg CreateHotelParams) (Hotel
 	return i, err
 }
 
+const deleteHotel = `-- name: DeleteHotel :one
+DELETE FROM hotels
+WHERE id = $1
+RETURNING id
+`
+
+func (q *Queries) DeleteHotel(ctx context.Context, id int64) (int64, error) {
+	row := q.db.QueryRow(ctx, deleteHotel, id)
+	var id_2 int64
+	err := row.Scan(&id_2)
+	return id_2, err
+}
+
 const getHotelByID = `-- name: GetHotelByID :one
 SELECT id, name, address, city, description, created_at FROM hotels
 WHERE id = $1
@@ -93,4 +106,43 @@ func (q *Queries) ListHotelsByCity(ctx context.Context, city string) ([]Hotel, e
 		return nil, err
 	}
 	return items, nil
+}
+
+const updateHotel = `-- name: UpdateHotel :one
+UPDATE hotels
+SET
+    name = $2,
+    address = $3,
+    city = $4,
+    description = $5
+WHERE id = $1
+RETURNING id, name, address, city, description, created_at
+`
+
+type UpdateHotelParams struct {
+	ID          int64       `json:"id"`
+	Name        string      `json:"name"`
+	Address     string      `json:"address"`
+	City        string      `json:"city"`
+	Description pgtype.Text `json:"description"`
+}
+
+func (q *Queries) UpdateHotel(ctx context.Context, arg UpdateHotelParams) (Hotel, error) {
+	row := q.db.QueryRow(ctx, updateHotel,
+		arg.ID,
+		arg.Name,
+		arg.Address,
+		arg.City,
+		arg.Description,
+	)
+	var i Hotel
+	err := row.Scan(
+		&i.ID,
+		&i.Name,
+		&i.Address,
+		&i.City,
+		&i.Description,
+		&i.CreatedAt,
+	)
+	return i, err
 }

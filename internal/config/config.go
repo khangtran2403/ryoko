@@ -7,6 +7,7 @@ import (
 
 	"github.com/joho/godotenv"
 )
+
 type Config struct {
 	Database struct {
 		URL string
@@ -32,8 +33,8 @@ type Config struct {
 	JWT struct {
 		Secret string
 	}
-	EncryptionKey   string
-	Environment     string
+	EncryptionKey string
+	Environment   string
 }
 
 var cfg *Config
@@ -44,17 +45,17 @@ func Load() (*Config, error) {
 			return nil, fmt.Errorf("found .env but failed to load it: %w", err)
 		}
 	}
- 
+
 	port, err := getEnvInt("API_PORT", 8080)
 	if err != nil {
 		return nil, fmt.Errorf("invalid API_PORT: %w", err)
 	}
- 
+
 	cfg = &Config{
 		Database: struct {
 			URL string
 		}{
-			URL : getEnv("DATABASE_URL", ""),
+			URL: getEnv("DATABASE_URL", ""),
 		},
 		API: struct {
 			Port int
@@ -63,21 +64,21 @@ func Load() (*Config, error) {
 		},
 		Environment: getEnv("ENV", "development"),
 	}
- 
+
 	return cfg, nil
 }
- 
+
 func Get() *Config {
 	return cfg
 }
- 
+
 func getEnv(key, defaultVal string) string {
 	if value, exists := os.LookupEnv(key); exists {
 		return value
 	}
 	return defaultVal
 }
- 
+
 func getEnvInt(key string, defaultVal int) (int, error) {
 	val := getEnv(key, "")
 	if val == "" {
@@ -89,4 +90,3 @@ func getEnvInt(key string, defaultVal int) (int, error) {
 	}
 	return intVal, nil
 }
-
