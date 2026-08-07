@@ -8,6 +8,12 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+type Amenity struct {
+	ID        int64              `json:"id"`
+	Name      string             `json:"name"`
+	CreatedAt pgtype.Timestamptz `json:"created_at"`
+}
+
 type Hotel struct {
 	ID          int64              `json:"id"`
 	Name        string             `json:"name"`
@@ -15,6 +21,11 @@ type Hotel struct {
 	City        string             `json:"city"`
 	Description pgtype.Text        `json:"description"`
 	CreatedAt   pgtype.Timestamptz `json:"created_at"`
+}
+
+type HotelAmenity struct {
+	HotelID   int64 `json:"hotel_id"`
+	AmenityID int64 `json:"amenity_id"`
 }
 
 type RoomType struct {

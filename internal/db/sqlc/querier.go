@@ -9,14 +9,19 @@ import (
 )
 
 type Querier interface {
+	AddAmenityToHotel(ctx context.Context, arg AddAmenityToHotelParams) (HotelAmenity, error)
+	CreateAmenity(ctx context.Context, name string) (Amenity, error)
 	CreateHotel(ctx context.Context, arg CreateHotelParams) (Hotel, error)
 	CreateRoomType(ctx context.Context, arg CreateRoomTypeParams) (RoomType, error)
 	DeleteHotel(ctx context.Context, id int64) (int64, error)
 	DeleteRoomType(ctx context.Context, id int64) (int64, error)
 	GetHotelByID(ctx context.Context, id int64) (Hotel, error)
 	GetRoomTypeByID(ctx context.Context, id int64) (RoomType, error)
+	ListAmenities(ctx context.Context) ([]Amenity, error)
+	ListAmenitiesByHotel(ctx context.Context, hotelID int64) ([]Amenity, error)
 	ListHotelsByCity(ctx context.Context, city string) ([]Hotel, error)
 	ListRoomTypesByHotel(ctx context.Context, hotelID int64) ([]RoomType, error)
+	RemoveAmenityFromHotel(ctx context.Context, arg RemoveAmenityFromHotelParams) (int64, error)
 	UpdateHotel(ctx context.Context, arg UpdateHotelParams) (Hotel, error)
 	UpdateRoomType(ctx context.Context, arg UpdateRoomTypeParams) (RoomType, error)
 }
