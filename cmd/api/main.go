@@ -32,6 +32,7 @@ func main() {
 	hotelHandler := handler.NewHotelHandler(queries)
 	roomTypeHandler := handler.NewRoomTypeHandler(queries)
 	amenityHandler := handler.NewAmenityHandler(queries)
+	userHandler := handler.NewUserHandler(queries)
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
@@ -52,6 +53,10 @@ func main() {
 	mux.HandleFunc("POST /hotels/{hotelID}/amenities", amenityHandler.AddAmenityToHotel)
 	mux.HandleFunc("GET /hotels/{hotelID}/amenities", amenityHandler.ListAmenitiesByHotel)
 	mux.HandleFunc("DELETE /hotels/{hotelID}/amenities/{amenityID}", amenityHandler.RemoveAmenitiesFromHotel)
+	mux.HandleFunc("POST /users", userHandler.CreateUser)
+	mux.HandleFunc("GET /users/{id}", userHandler.GetUserByID)
+	mux.HandleFunc("PUT /users/{id}", userHandler.UpdateUser)
+	mux.HandleFunc("DELETE /users/{id}", userHandler.DeleteUser)
 
 	addr := ":" + strconv.Itoa(cfg.API.Port)
 	log.Printf("listening on %s", addr)

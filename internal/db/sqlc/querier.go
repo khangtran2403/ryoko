@@ -13,10 +13,13 @@ type Querier interface {
 	CreateAmenity(ctx context.Context, name string) (Amenity, error)
 	CreateHotel(ctx context.Context, arg CreateHotelParams) (Hotel, error)
 	CreateRoomType(ctx context.Context, arg CreateRoomTypeParams) (RoomType, error)
+	CreateUser(ctx context.Context, arg CreateUserParams) (User, error)
 	DeleteHotel(ctx context.Context, id int64) (int64, error)
 	DeleteRoomType(ctx context.Context, id int64) (int64, error)
+	DeleteUser(ctx context.Context, id int64) (int64, error)
 	GetHotelByID(ctx context.Context, id int64) (Hotel, error)
 	GetRoomTypeByID(ctx context.Context, id int64) (RoomType, error)
+	GetUserByID(ctx context.Context, id int64) (User, error)
 	ListAmenities(ctx context.Context) ([]Amenity, error)
 	ListAmenitiesByHotel(ctx context.Context, hotelID int64) ([]Amenity, error)
 	ListHotelsByCity(ctx context.Context, city string) ([]Hotel, error)
@@ -24,6 +27,7 @@ type Querier interface {
 	RemoveAmenityFromHotel(ctx context.Context, arg RemoveAmenityFromHotelParams) (int64, error)
 	UpdateHotel(ctx context.Context, arg UpdateHotelParams) (Hotel, error)
 	UpdateRoomType(ctx context.Context, arg UpdateRoomTypeParams) (RoomType, error)
+	UpdateUser(ctx context.Context, arg UpdateUserParams) (User, error)
 }
 
 var _ Querier = (*Queries)(nil)

@@ -38,3 +38,12 @@ type RoomType struct {
 	TotalRooms    int32              `json:"total_rooms"`
 	CreatedAt     pgtype.Timestamptz `json:"created_at"`
 }
+
+type User struct {
+	ID        int64              `json:"id"`
+	Email     string             `json:"email"`
+	FullName  string             `json:"full_name"`
+	Phone     pgtype.Text        `json:"phone"`
+	CreatedAt pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt pgtype.Timestamptz `json:"updated_at"`
+}
