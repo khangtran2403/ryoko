@@ -40,10 +40,12 @@ type RoomType struct {
 }
 
 type User struct {
-	ID        int64              `json:"id"`
-	Email     string             `json:"email"`
-	FullName  string             `json:"full_name"`
-	Phone     pgtype.Text        `json:"phone"`
-	CreatedAt pgtype.Timestamptz `json:"created_at"`
-	UpdatedAt pgtype.Timestamptz `json:"updated_at"`
+	ID           int64              `json:"id"`
+	Email        string             `json:"email"`
+	PasswordHash pgtype.Text        `json:"password_hash"`
+	Role         string             `json:"role"`
+	FullName     string             `json:"full_name"`
+	Phone        pgtype.Text        `json:"phone"`
+	CreatedAt    pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt    pgtype.Timestamptz `json:"updated_at"`
 }

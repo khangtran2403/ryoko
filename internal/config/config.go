@@ -50,6 +50,10 @@ func Load() (*Config, error) {
 	if err != nil {
 		return nil, fmt.Errorf("invalid API_PORT: %w", err)
 	}
+	jwtSecret := getEnv("JWT_SECRET", "")
+	if len([]byte(jwtSecret)) < 32 {
+		return nil, fmt.Errorf("JWT_SECRET must contain at least 32 bytes")
+	}
 
 	cfg = &Config{
 		Database: struct {
@@ -61,6 +65,11 @@ func Load() (*Config, error) {
 			Port int
 		}{
 			Port: port,
+		},
+		JWT: struct {
+			Secret string
+		}{
+			Secret: jwtSecret,
 		},
 		Environment: getEnv("ENV", "development"),
 	}

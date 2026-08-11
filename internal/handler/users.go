@@ -37,12 +37,12 @@ func (req CreateUserRequest) Validate() []string {
 	var problems []string
 	if req.Email == "" {
 		problems = append(problems, "email is required")
-	}else{
-	address, err := mail.ParseAddress(req.Email)
-	if err != nil || address.Address != req.Email {
-		problems = append(problems, "email must be valid")
+	} else {
+		address, err := mail.ParseAddress(req.Email)
+		if err != nil || address.Address != req.Email {
+			problems = append(problems, "email must be valid")
+		}
 	}
-   } 
 	if req.FullName == "" {
 		problems = append(problems, "full name is required")
 	}
