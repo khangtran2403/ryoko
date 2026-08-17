@@ -118,6 +118,9 @@ func (m *TokenManager) ParseToken(tokenString string) (*Principal, error) {
 		Role:   claims.Role,
 	}, nil
 }
+func (m *TokenManager) TTL() time.Duration {
+	return m.ttl
+}
 
 func validRole(role string) bool {
 	return role == RoleCustomer || role == RoleAdmin
