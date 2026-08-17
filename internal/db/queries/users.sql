@@ -1,10 +1,5 @@
--- name: CreateUser :one
-INSERT INTO users (email, full_name, phone)
-VALUES ($1, $2, $3)
-RETURNING id, email, full_name, phone, created_at, updated_at;
-
 -- name: GetUserByID :one
-SELECT id, email, full_name, phone, created_at, updated_at
+SELECT id, email, full_name, phone, role, created_at, updated_at
 FROM users
 WHERE id = $1;
 
@@ -16,7 +11,7 @@ SET
     phone = $4,
     updated_at = now()
 WHERE id = $1
-RETURNING id, email, full_name, phone, created_at, updated_at;
+RETURNING id, email, full_name, phone, role, created_at, updated_at;
 
 -- name: DeleteUser :one
 DELETE FROM users

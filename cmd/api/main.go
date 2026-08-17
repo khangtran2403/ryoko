@@ -5,11 +5,14 @@ import (
 	"log"
 	"net/http"
 	"strconv"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/khangtran2403/ryoko/internal/auth"
 	"github.com/khangtran2403/ryoko/internal/config"
 	"github.com/khangtran2403/ryoko/internal/db/sqlc"
 	"github.com/khangtran2403/ryoko/internal/handler"
+	"github.com/khangtran2403/ryoko/internal/middleware"
 )
 
 func main() {
@@ -28,35 +31,73 @@ func main() {
 	}
 
 	queries := sqlc.New(pool)
+	tokenManager, err := auth.NewTokenManager(
+		cfg.JWT.Secret,
+		"ryoko",
+		"ryoko-api",
+		15*time.Minute,
+	)
+	if err != nil {
+		log.Fatalf("invalid token configuration: %v", err)
+	}
 
 	hotelHandler := handler.NewHotelHandler(queries)
 	roomTypeHandler := handler.NewRoomTypeHandler(queries)
 	amenityHandler := handler.NewAmenityHandler(queries)
 	userHandler := handler.NewUserHandler(queries)
+	authHandler := handler.NewAuthHandler(queries, tokenManager)
+	authMiddleware := middleware.NewAuthMiddleware(tokenManager)
+	adminOnly := func(handler http.HandlerFunc) http.Handler {
+		return authMiddleware.Authenticate(
+			middleware.RequireRole(
+				auth.RoleAdmin,
+				handler,
+			),
+		)
+	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte("OK"))
 	})
-	mux.HandleFunc("POST /hotels", hotelHandler.Create)
+
+	mux.Handle("POST /hotels", adminOnly(hotelHandler.Create))
 	mux.HandleFunc("GET /hotels/{id}", hotelHandler.GetByID)
 	mux.HandleFunc("GET /hotels", hotelHandler.ListHotelsByCity)
-	mux.HandleFunc("PUT /hotels/{id}", hotelHandler.UpdateHotel)
-	mux.HandleFunc("DELETE /hotels/{id}", hotelHandler.DeleteHotel)
-	mux.HandleFunc("POST /hotels/{hotelID}/room-types", roomTypeHandler.CreateRoomType)
+	mux.Handle("PUT /hotels/{id}", adminOnly(hotelHandler.UpdateHotel))
+	mux.Handle("DELETE /hotels/{id}", adminOnly(hotelHandler.DeleteHotel))
+	mux.Handle("POST /hotels/{hotelID}/room-types", adminOnly(roomTypeHandler.CreateRoomType))
 	mux.HandleFunc("GET /room-types/{id}", roomTypeHandler.GetRoomTypeByID)
-	mux.HandleFunc("PUT /room-types/{id}", roomTypeHandler.UpdateRoomType)
-	mux.HandleFunc("DELETE /room-types/{id}", roomTypeHandler.DeleteRoomType)
+	mux.Handle("PUT /room-types/{id}", adminOnly(roomTypeHandler.UpdateRoomType))
+	mux.Handle("DELETE /room-types/{id}", adminOnly(roomTypeHandler.DeleteRoomType))
 	mux.HandleFunc("GET /hotels/{hotelID}/room-types", roomTypeHandler.ListRoomTypesByHotel)
-	mux.HandleFunc("POST /amenities", amenityHandler.CreateAmenity)
+	mux.Handle("POST /amenities", adminOnly(amenityHandler.CreateAmenity))
 	mux.HandleFunc("GET /amenities", amenityHandler.ListAmenities)
-	mux.HandleFunc("POST /hotels/{hotelID}/amenities", amenityHandler.AddAmenityToHotel)
+	mux.Handle("POST /hotels/{hotelID}/amenities", adminOnly(amenityHandler.AddAmenityToHotel))
 	mux.HandleFunc("GET /hotels/{hotelID}/amenities", amenityHandler.ListAmenitiesByHotel)
-	mux.HandleFunc("DELETE /hotels/{hotelID}/amenities/{amenityID}", amenityHandler.RemoveAmenitiesFromHotel)
-	mux.HandleFunc("POST /users", userHandler.CreateUser)
-	mux.HandleFunc("GET /users/{id}", userHandler.GetUserByID)
-	mux.HandleFunc("PUT /users/{id}", userHandler.UpdateUser)
-	mux.HandleFunc("DELETE /users/{id}", userHandler.DeleteUser)
+	mux.Handle("DELETE /hotels/{hotelID}/amenities/{amenityID}", adminOnly(amenityHandler.RemoveAmenitiesFromHotel))
+	mux.Handle(
+		"GET /me",
+		authMiddleware.Authenticate(
+			http.HandlerFunc(userHandler.GetMe),
+		),
+	)
+
+	mux.Handle(
+		"PUT /me",
+		authMiddleware.Authenticate(
+			http.HandlerFunc(userHandler.UpdateMe),
+		),
+	)
+
+	mux.Handle(
+		"DELETE /me",
+		authMiddleware.Authenticate(
+			http.HandlerFunc(userHandler.DeleteMe),
+		),
+	)
+	mux.HandleFunc("POST /auth/register", authHandler.RegisterUser)
+	mux.HandleFunc("POST /auth/login", authHandler.LoginUser)
 
 	addr := ":" + strconv.Itoa(cfg.API.Port)
 	log.Printf("listening on %s", addr)

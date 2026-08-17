@@ -13,7 +13,6 @@ type Querier interface {
 	CreateAmenity(ctx context.Context, name string) (Amenity, error)
 	CreateHotel(ctx context.Context, arg CreateHotelParams) (Hotel, error)
 	CreateRoomType(ctx context.Context, arg CreateRoomTypeParams) (RoomType, error)
-	CreateUser(ctx context.Context, arg CreateUserParams) (CreateUserRow, error)
 	DeleteHotel(ctx context.Context, id int64) (int64, error)
 	DeleteRoomType(ctx context.Context, id int64) (int64, error)
 	DeleteUser(ctx context.Context, id int64) (int64, error)
