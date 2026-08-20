@@ -14,6 +14,21 @@ type Amenity struct {
 	CreatedAt pgtype.Timestamptz `json:"created_at"`
 }
 
+type Booking struct {
+	ID            int64              `json:"id"`
+	UserID        int64              `json:"user_id"`
+	RoomTypeID    int64              `json:"room_type_id"`
+	CheckIn       pgtype.Date        `json:"check_in"`
+	CheckOut      pgtype.Date        `json:"check_out"`
+	RoomsCount    int32              `json:"rooms_count"`
+	GuestCount    int32              `json:"guest_count"`
+	PricePerNight pgtype.Numeric     `json:"price_per_night"`
+	TotalPrice    pgtype.Numeric     `json:"total_price"`
+	Status        string             `json:"status"`
+	CreatedAt     pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt     pgtype.Timestamptz `json:"updated_at"`
+}
+
 type Hotel struct {
 	ID          int64              `json:"id"`
 	Name        string             `json:"name"`
@@ -37,6 +52,12 @@ type RoomType struct {
 	Capacity      int32              `json:"capacity"`
 	TotalRooms    int32              `json:"total_rooms"`
 	CreatedAt     pgtype.Timestamptz `json:"created_at"`
+}
+
+type RoomTypeAvailability struct {
+	RoomTypeID  int64       `json:"room_type_id"`
+	Date        pgtype.Date `json:"date"`
+	RoomsBooked int32       `json:"rooms_booked"`
 }
 
 type User struct {

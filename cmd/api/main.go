@@ -9,6 +9,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/khangtran2403/ryoko/internal/auth"
+	"github.com/khangtran2403/ryoko/internal/booking"
 	"github.com/khangtran2403/ryoko/internal/config"
 	"github.com/khangtran2403/ryoko/internal/db/sqlc"
 	"github.com/khangtran2403/ryoko/internal/handler"
@@ -47,6 +48,8 @@ func main() {
 	userHandler := handler.NewUserHandler(queries)
 	authHandler := handler.NewAuthHandler(queries, tokenManager)
 	authMiddleware := middleware.NewAuthMiddleware(tokenManager)
+	bookingService := booking.NewService(pool, queries)
+	bookingHandler := handler.NewBookingHandler(bookingService)
 	adminOnly := func(handler http.HandlerFunc) http.Handler {
 		return authMiddleware.Authenticate(
 			middleware.RequireRole(
@@ -94,6 +97,20 @@ func main() {
 		"DELETE /me",
 		authMiddleware.Authenticate(
 			http.HandlerFunc(userHandler.DeleteMe),
+		),
+	)
+	mux.Handle("GET /me/bookings/{bookingID}", authMiddleware.Authenticate(
+		http.HandlerFunc(bookingHandler.GetBookingByUserID),
+	),
+	)
+	mux.Handle("GET /me/bookings", authMiddleware.Authenticate(
+		http.HandlerFunc(bookingHandler.ListBookingsByUser),
+	),
+	)
+	mux.Handle(
+		"POST /room-types/{roomTypeID}/bookings",
+		authMiddleware.Authenticate(
+			http.HandlerFunc(bookingHandler.CreateBooking),
 		),
 	)
 	mux.HandleFunc("POST /auth/register", authHandler.RegisterUser)
