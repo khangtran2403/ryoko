@@ -17,6 +17,7 @@ type bookingService interface {
 	CreateBooking(ctx context.Context, input booking.CreateInput) (sqlc.Booking, error)
 	ListBookingsByUser(ctx context.Context, userID int64) ([]sqlc.Booking, error)
 	GetBookingByUserID(ctx context.Context, bookingID int64, userID int64) (sqlc.Booking, error)
+	CancelBooking(ctx context.Context, bookingID int64, userID int64) (sqlc.Booking, error)
 }
 
 type BookingHandler struct {
@@ -154,4 +155,39 @@ func (h *BookingHandler) ListBookingsByUser(w http.ResponseWriter, r *http.Reque
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	json.NewEncoder(w).Encode(listBooking)
+}
+func (h *BookingHandler) CancelBooking(w http.ResponseWriter, r *http.Request) {
+	getID := r.PathValue("bookingID")
+	if getID == "" {
+		http.Error(w, "booking ID is required", http.StatusBadRequest)
+		return
+	}
+	convID, err := strconv.ParseInt(getID, 10, 64)
+	if err != nil {
+		http.Error(w, "Invalid request body", http.StatusBadRequest)
+		return
+	}
+	principal, ok := middleware.PrincipalFromContext(r.Context())
+	if !ok {
+		w.Header().Set("WWW-Authenticate", "Bearer")
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+	cancelBooking, err := h.service.CancelBooking(r.Context(), convID, principal.UserID)
+	switch {
+	case errors.Is(err, booking.ErrBookingNotFound):
+		http.Error(w, "Booking not found", http.StatusNotFound)
+		return
+	case errors.Is(err, booking.ErrBookingNotCancellable):
+		http.Error(w, "Booking already cancelled", http.StatusConflict)
+		return
+	case err != nil:
+		http.Error(w, "cancel booking failed", http.StatusInternalServerError)
+		return
+
+	default:
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		json.NewEncoder(w).Encode(cancelBooking)
+	}
 }

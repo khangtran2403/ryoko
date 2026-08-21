@@ -10,15 +10,18 @@ import (
 
 type Querier interface {
 	AddAmenityToHotel(ctx context.Context, arg AddAmenityToHotelParams) (HotelAmenity, error)
+	CancelBooking(ctx context.Context, arg CancelBookingParams) (Booking, error)
 	CreateAmenity(ctx context.Context, name string) (Amenity, error)
 	CreateBooking(ctx context.Context, arg CreateBookingParams) (Booking, error)
 	CreateHotel(ctx context.Context, arg CreateHotelParams) (Hotel, error)
 	CreateRoomType(ctx context.Context, arg CreateRoomTypeParams) (RoomType, error)
+	DecrementAvailability(ctx context.Context, arg DecrementAvailabilityParams) (int64, error)
 	DeleteHotel(ctx context.Context, id int64) (int64, error)
 	DeleteRoomType(ctx context.Context, id int64) (int64, error)
 	DeleteUser(ctx context.Context, id int64) (int64, error)
 	EnsureAvailabilityRows(ctx context.Context, arg EnsureAvailabilityRowsParams) error
 	GetBookingByIDForUser(ctx context.Context, arg GetBookingByIDForUserParams) (Booking, error)
+	GetBookingForCancellation(ctx context.Context, arg GetBookingForCancellationParams) (Booking, error)
 	GetHotelByID(ctx context.Context, id int64) (Hotel, error)
 	GetRoomTypeByID(ctx context.Context, id int64) (RoomType, error)
 	GetRoomTypeForBooking(ctx context.Context, roomTypeID int64) (GetRoomTypeForBookingRow, error)

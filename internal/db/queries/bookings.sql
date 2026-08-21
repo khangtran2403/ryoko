@@ -115,3 +115,49 @@ SELECT
 FROM bookings
 WHERE id = sqlc.arg(booking_id)
 AND user_id = sqlc.arg(user_id);
+-- name: GetBookingForCancellation :one
+SELECT
+    id,
+    user_id,
+    room_type_id,
+    check_in,
+    check_out,
+    rooms_count,
+    guest_count,
+    price_per_night,
+    total_price,
+    status,
+    created_at,
+    updated_at
+FROM bookings
+WHERE id = sqlc.arg(booking_id)
+AND user_id = sqlc.arg(user_id)
+FOR UPDATE;
+-- name: DecrementAvailability :execrows
+UPDATE room_type_availability
+SET rooms_booked = rooms_booked - sqlc.arg(rooms_count)::int
+WHERE room_type_id = sqlc.arg(room_type_id)
+  AND date >= sqlc.arg(check_in)::date
+  AND date < sqlc.arg(check_out)::date
+  AND rooms_booked >= sqlc.arg(rooms_count)::int;
+-- name: CancelBooking :one
+UPDATE bookings
+SET
+    status = 'cancelled',
+    updated_at = now()
+WHERE id = sqlc.arg(booking_id)
+  AND user_id = sqlc.arg(user_id)
+  AND status = 'confirmed'
+RETURNING
+    id,
+    user_id,
+    room_type_id,
+    check_in,
+    check_out,
+    rooms_count,
+    guest_count,
+    price_per_night,
+    total_price,
+    status,
+    created_at,
+    updated_at;

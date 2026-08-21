@@ -11,6 +11,54 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const cancelBooking = `-- name: CancelBooking :one
+UPDATE bookings
+SET
+    status = 'cancelled',
+    updated_at = now()
+WHERE id = $1
+  AND user_id = $2
+  AND status = 'confirmed'
+RETURNING
+    id,
+    user_id,
+    room_type_id,
+    check_in,
+    check_out,
+    rooms_count,
+    guest_count,
+    price_per_night,
+    total_price,
+    status,
+    created_at,
+    updated_at
+`
+
+type CancelBookingParams struct {
+	BookingID int64 `json:"booking_id"`
+	UserID    int64 `json:"user_id"`
+}
+
+func (q *Queries) CancelBooking(ctx context.Context, arg CancelBookingParams) (Booking, error) {
+	row := q.db.QueryRow(ctx, cancelBooking, arg.BookingID, arg.UserID)
+	var i Booking
+	err := row.Scan(
+		&i.ID,
+		&i.UserID,
+		&i.RoomTypeID,
+		&i.CheckIn,
+		&i.CheckOut,
+		&i.RoomsCount,
+		&i.GuestCount,
+		&i.PricePerNight,
+		&i.TotalPrice,
+		&i.Status,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
 const createBooking = `-- name: CreateBooking :one
 INSERT INTO bookings (
     user_id,
@@ -87,6 +135,35 @@ func (q *Queries) CreateBooking(ctx context.Context, arg CreateBookingParams) (B
 	return i, err
 }
 
+const decrementAvailability = `-- name: DecrementAvailability :execrows
+UPDATE room_type_availability
+SET rooms_booked = rooms_booked - $1::int
+WHERE room_type_id = $2
+  AND date >= $3::date
+  AND date < $4::date
+  AND rooms_booked >= $1::int
+`
+
+type DecrementAvailabilityParams struct {
+	RoomsCount int32       `json:"rooms_count"`
+	RoomTypeID int64       `json:"room_type_id"`
+	CheckIn    pgtype.Date `json:"check_in"`
+	CheckOut   pgtype.Date `json:"check_out"`
+}
+
+func (q *Queries) DecrementAvailability(ctx context.Context, arg DecrementAvailabilityParams) (int64, error) {
+	result, err := q.db.Exec(ctx, decrementAvailability,
+		arg.RoomsCount,
+		arg.RoomTypeID,
+		arg.CheckIn,
+		arg.CheckOut,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
 const ensureAvailabilityRows = `-- name: EnsureAvailabilityRows :exec
 INSERT INTO room_type_availability (
     room_type_id,
@@ -141,6 +218,51 @@ type GetBookingByIDForUserParams struct {
 
 func (q *Queries) GetBookingByIDForUser(ctx context.Context, arg GetBookingByIDForUserParams) (Booking, error) {
 	row := q.db.QueryRow(ctx, getBookingByIDForUser, arg.BookingID, arg.UserID)
+	var i Booking
+	err := row.Scan(
+		&i.ID,
+		&i.UserID,
+		&i.RoomTypeID,
+		&i.CheckIn,
+		&i.CheckOut,
+		&i.RoomsCount,
+		&i.GuestCount,
+		&i.PricePerNight,
+		&i.TotalPrice,
+		&i.Status,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const getBookingForCancellation = `-- name: GetBookingForCancellation :one
+SELECT
+    id,
+    user_id,
+    room_type_id,
+    check_in,
+    check_out,
+    rooms_count,
+    guest_count,
+    price_per_night,
+    total_price,
+    status,
+    created_at,
+    updated_at
+FROM bookings
+WHERE id = $1
+AND user_id = $2
+FOR UPDATE
+`
+
+type GetBookingForCancellationParams struct {
+	BookingID int64 `json:"booking_id"`
+	UserID    int64 `json:"user_id"`
+}
+
+func (q *Queries) GetBookingForCancellation(ctx context.Context, arg GetBookingForCancellationParams) (Booking, error) {
+	row := q.db.QueryRow(ctx, getBookingForCancellation, arg.BookingID, arg.UserID)
 	var i Booking
 	err := row.Scan(
 		&i.ID,

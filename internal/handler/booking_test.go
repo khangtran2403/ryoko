@@ -17,18 +17,21 @@ import (
 )
 
 type fakeBookingCreator struct {
-	called       bool
-	input        booking.CreateInput
-	booking      sqlc.Booking
-	err          error
-	getCalled    bool
-	bookingID    int64
-	userID       int64
-	getBooking   sqlc.Booking
-	getErr       error
-	listCalled   bool
-	listBookings []sqlc.Booking
-	listErr      error
+	called        bool
+	input         booking.CreateInput
+	booking       sqlc.Booking
+	err           error
+	getCalled     bool
+	bookingID     int64
+	userID        int64
+	getBooking    sqlc.Booking
+	getErr        error
+	listCalled    bool
+	listBookings  []sqlc.Booking
+	listErr       error
+	cancelCalled  bool
+	cancelBooking sqlc.Booking
+	cancelErr     error
 }
 
 func (f *fakeBookingCreator) CreateBooking(_ context.Context, input booking.CreateInput) (sqlc.Booking, error) {
@@ -55,6 +58,17 @@ func (f *fakeBookingCreator) ListBookingsByUser(
 	f.listCalled = true
 	f.userID = userID
 	return f.listBookings, f.listErr
+}
+
+func (f *fakeBookingCreator) CancelBooking(
+	_ context.Context,
+	bookingID int64,
+	userID int64,
+) (sqlc.Booking, error) {
+	f.cancelCalled = true
+	f.bookingID = bookingID
+	f.userID = userID
+	return f.cancelBooking, f.cancelErr
 }
 
 func TestBookingHandlerCreateBooking(t *testing.T) {
@@ -415,6 +429,117 @@ func TestBookingHandlerReadEndpointsRejectUnauthenticatedRequests(t *testing.T) 
 	}
 }
 
+func TestBookingHandlerCancelBooking(t *testing.T) {
+	service := &fakeBookingCreator{
+		cancelBooking: sqlc.Booking{
+			ID:         88,
+			UserID:     42,
+			RoomTypeID: 7,
+			RoomsCount: 1,
+			GuestCount: 2,
+			Status:     "cancelled",
+		},
+	}
+	mux, token := newAuthenticatedBookingMux(t, service, 42)
+
+	recorder := performBookingRequest(mux, token, "/me/bookings/88/cancel", "")
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body = %s", recorder.Code, http.StatusOK, recorder.Body.String())
+	}
+	if !strings.HasPrefix(recorder.Header().Get("Content-Type"), "application/json") {
+		t.Errorf("Content-Type = %q, want application/json", recorder.Header().Get("Content-Type"))
+	}
+	if !service.cancelCalled {
+		t.Fatal("booking service was not called")
+	}
+	if service.bookingID != 88 {
+		t.Errorf("booking ID = %d, want 88", service.bookingID)
+	}
+	if service.userID != 42 {
+		t.Errorf("user ID = %d, want authenticated user ID 42", service.userID)
+	}
+
+	var response sqlc.Booking
+	if err := json.NewDecoder(recorder.Body).Decode(&response); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if response.ID != 88 || response.Status != "cancelled" {
+		t.Errorf("response = {ID:%d Status:%q}, want {ID:88 Status:cancelled}", response.ID, response.Status)
+	}
+}
+
+func TestBookingHandlerCancelBookingRejectsInvalidID(t *testing.T) {
+	service := &fakeBookingCreator{}
+	mux, token := newAuthenticatedBookingMux(t, service, 42)
+
+	recorder := performBookingRequest(mux, token, "/me/bookings/not-a-number/cancel", "")
+
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d; body = %s", recorder.Code, http.StatusBadRequest, recorder.Body.String())
+	}
+	if service.cancelCalled {
+		t.Fatal("booking service was called for an invalid booking ID")
+	}
+}
+
+func TestBookingHandlerCancelBookingMapsServiceErrors(t *testing.T) {
+	tests := []struct {
+		name       string
+		err        error
+		wantStatus int
+	}{
+		{
+			name:       "booking not found",
+			err:        booking.ErrBookingNotFound,
+			wantStatus: http.StatusNotFound,
+		},
+		{
+			name:       "booking not cancellable",
+			err:        booking.ErrBookingNotCancellable,
+			wantStatus: http.StatusConflict,
+		},
+		{
+			name:       "unexpected error",
+			err:        errors.New("database unavailable"),
+			wantStatus: http.StatusInternalServerError,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			service := &fakeBookingCreator{cancelErr: tt.err}
+			mux, token := newAuthenticatedBookingMux(t, service, 42)
+
+			recorder := performBookingRequest(mux, token, "/me/bookings/88/cancel", "")
+
+			if recorder.Code != tt.wantStatus {
+				t.Fatalf("status = %d, want %d; body = %s", recorder.Code, tt.wantStatus, recorder.Body.String())
+			}
+			if !service.cancelCalled {
+				t.Fatal("booking service was not called")
+			}
+		})
+	}
+}
+
+func TestBookingHandlerCancelBookingRejectsUnauthenticatedRequest(t *testing.T) {
+	service := &fakeBookingCreator{}
+	mux, _ := newAuthenticatedBookingMux(t, service, 42)
+
+	recorder := performBookingRequest(mux, "", "/me/bookings/88/cancel", "")
+
+	if recorder.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusUnauthorized)
+	}
+	if recorder.Header().Get("WWW-Authenticate") != "Bearer" {
+		t.Errorf("WWW-Authenticate = %q, want Bearer", recorder.Header().Get("WWW-Authenticate"))
+	}
+	if service.cancelCalled {
+		t.Fatal("booking service was called for an unauthenticated request")
+	}
+}
+
 func newAuthenticatedBookingMux(t *testing.T, service bookingService, userID int64) (*http.ServeMux, string) {
 	t.Helper()
 
@@ -446,6 +571,10 @@ func newAuthenticatedBookingMux(t *testing.T, service bookingService, userID int
 	mux.Handle(
 		"GET /me/bookings",
 		authMiddleware.Authenticate(http.HandlerFunc(bookingHandler.ListBookingsByUser)),
+	)
+	mux.Handle(
+		"POST /me/bookings/{bookingID}/cancel",
+		authMiddleware.Authenticate(http.HandlerFunc(bookingHandler.CancelBooking)),
 	)
 
 	return mux, token

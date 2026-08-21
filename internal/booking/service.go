@@ -13,14 +13,15 @@ import (
 )
 
 var (
-	ErrInvalidDates     = errors.New("invalid booking dates")
-	ErrInvalidRooms     = errors.New("invalid room count")
-	ErrInvalidGuests    = errors.New("invalid guest count")
-	ErrRoomTypeNotFound = errors.New("room type not found")
-	ErrCapacityExceeded = errors.New("room capacity exceeded")
-	ErrUnavailable      = errors.New("rooms unavailable")
-	ErrInvalidUser      = errors.New("invalid user")
-	ErrBookingNotFound  = errors.New("booking not found")
+	ErrInvalidDates          = errors.New("invalid booking dates")
+	ErrInvalidRooms          = errors.New("invalid room count")
+	ErrInvalidGuests         = errors.New("invalid guest count")
+	ErrRoomTypeNotFound      = errors.New("room type not found")
+	ErrCapacityExceeded      = errors.New("room capacity exceeded")
+	ErrUnavailable           = errors.New("rooms unavailable")
+	ErrInvalidUser           = errors.New("invalid user")
+	ErrBookingNotFound       = errors.New("booking not found")
+	ErrBookingNotCancellable = errors.New("booking cannot be cancelled")
 )
 
 type CreateInput struct {
@@ -207,4 +208,89 @@ func (s *Service) ListBookingsByUser(
 	}
 
 	return bookings, nil
+}
+
+func (s *Service) CancelBooking(ctx context.Context, bookingID int64, userID int64) (sqlc.Booking, error) {
+	if bookingID <= 0 {
+		return sqlc.Booking{}, ErrBookingNotFound
+	}
+	if userID <= 0 {
+		return sqlc.Booking{}, ErrInvalidUser
+	}
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{
+		IsoLevel: pgx.ReadCommitted,
+	})
+	if err != nil {
+		return sqlc.Booking{}, fmt.Errorf("begin transaction: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	qtx := s.queries.WithTx(tx)
+
+	lockBooking, err := qtx.GetBookingForCancellation(ctx, sqlc.GetBookingForCancellationParams{
+		BookingID: bookingID,
+		UserID:    userID,
+	})
+	if errors.Is(err, pgx.ErrNoRows) {
+		return sqlc.Booking{}, ErrBookingNotFound
+	}
+	if err != nil {
+		return sqlc.Booking{}, fmt.Errorf("get booking: %w ", err)
+	}
+	if lockBooking.Status != "confirmed" {
+		return sqlc.Booking{}, ErrBookingNotCancellable
+	}
+	checkIn := lockBooking.CheckIn
+	checkOut := lockBooking.CheckOut
+	roomsCount := lockBooking.RoomsCount
+	roomTypeID := lockBooking.RoomTypeID
+	nights := int(checkOut.Time.Sub(checkIn.Time) / (24 * time.Hour))
+	if nights <= 0 {
+		return sqlc.Booking{}, fmt.Errorf("invalid stored booking dates")
+	}
+	rows, err := qtx.LockAvailabilityRows(ctx, sqlc.LockAvailabilityRowsParams{
+		RoomTypeID: roomTypeID,
+		CheckIn:    checkIn,
+		CheckOut:   checkOut,
+	})
+	if err != nil {
+		return sqlc.Booking{}, fmt.Errorf(
+			"lock availability rows: %w",
+			err,
+		)
+	}
+	if len(rows) != nights {
+		return sqlc.Booking{}, fmt.Errorf("availability invariant violated: got %d rows for %d nights",
+			len(rows),
+			nights)
+	}
+	affected, err := qtx.DecrementAvailability(ctx, sqlc.DecrementAvailabilityParams{
+		RoomsCount: roomsCount,
+		RoomTypeID: roomTypeID,
+		CheckIn:    checkIn,
+		CheckOut:   checkOut,
+	})
+	if err != nil {
+		return sqlc.Booking{}, fmt.Errorf("decrement availability: %w", err)
+	}
+	if affected != int64(nights) {
+		return sqlc.Booking{}, ErrUnavailable
+	}
+	cancel, err := qtx.CancelBooking(ctx, sqlc.CancelBookingParams{
+		BookingID: bookingID,
+		UserID:    userID,
+	})
+	if errors.Is(err, pgx.ErrNoRows) {
+		return sqlc.Booking{}, ErrBookingNotCancellable
+	}
+	if err != nil {
+		return sqlc.Booking{}, fmt.Errorf("cancel booking: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return sqlc.Booking{}, fmt.Errorf(
+			"commit booking transaction: %w",
+			err,
+		)
+	}
+	return cancel, nil
 }

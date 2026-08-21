@@ -150,6 +150,187 @@ func TestCreateBookingPreventsConcurrentOverbooking(t *testing.T) {
 	assertBookingCounts(t, pool, 1, 3)
 }
 
+func TestCancelBookingRestoresAvailabilityExactlyOnce(t *testing.T) {
+	pool, service := newBookingIntegrationService(t)
+	userID, roomTypeID := insertBookingFixtures(t, pool, 2)
+	input := futureBookingInput(userID, roomTypeID, 1)
+
+	created, err := service.CreateBooking(context.Background(), input)
+	if err != nil {
+		t.Fatalf("CreateBooking() error = %v", err)
+	}
+	assertAvailabilityRange(t, pool, roomTypeID, 3, 1, 1)
+
+	cancelled, err := service.CancelBooking(context.Background(), created.ID, userID)
+	if err != nil {
+		t.Fatalf("CancelBooking() error = %v", err)
+	}
+	if cancelled.Status != "cancelled" {
+		t.Errorf("cancelled status = %q, want cancelled", cancelled.Status)
+	}
+	assertAvailabilityRange(t, pool, roomTypeID, 3, 0, 0)
+
+	_, err = service.CancelBooking(context.Background(), created.ID, userID)
+	if !errors.Is(err, ErrBookingNotCancellable) {
+		t.Fatalf("second CancelBooking() error = %v, want ErrBookingNotCancellable", err)
+	}
+	assertAvailabilityRange(t, pool, roomTypeID, 3, 0, 0)
+}
+
+func TestCancelBookingPreventsConcurrentDoubleCancellation(t *testing.T) {
+	pool, service := newBookingIntegrationService(t)
+	userID, roomTypeID := insertBookingFixtures(t, pool, 2)
+	created, err := service.CreateBooking(
+		context.Background(),
+		futureBookingInput(userID, roomTypeID, 1),
+	)
+	if err != nil {
+		t.Fatalf("CreateBooking() error = %v", err)
+	}
+
+	start := make(chan struct{})
+	results := make(chan error, 2)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	for range 2 {
+		go func() {
+			<-start
+			_, err := service.CancelBooking(ctx, created.ID, userID)
+			results <- err
+		}()
+	}
+	close(start)
+
+	var successes int
+	var notCancellable int
+	for range 2 {
+		err := <-results
+		switch {
+		case err == nil:
+			successes++
+		case errors.Is(err, ErrBookingNotCancellable):
+			notCancellable++
+		default:
+			t.Fatalf("unexpected concurrent cancellation error: %v", err)
+		}
+	}
+	if successes != 1 || notCancellable != 1 {
+		t.Fatalf(
+			"concurrent results: successes=%d notCancellable=%d, want 1 and 1",
+			successes,
+			notCancellable,
+		)
+	}
+	assertAvailabilityRange(t, pool, roomTypeID, 3, 0, 0)
+}
+
+func TestCancelBookingDoesNotExposeAnotherUsersBooking(t *testing.T) {
+	pool, service := newBookingIntegrationService(t)
+	ownerID, roomTypeID := insertBookingFixtures(t, pool, 2)
+	created, err := service.CreateBooking(
+		context.Background(),
+		futureBookingInput(ownerID, roomTypeID, 1),
+	)
+	if err != nil {
+		t.Fatalf("CreateBooking() error = %v", err)
+	}
+
+	var otherUserID int64
+	err = pool.QueryRow(
+		context.Background(),
+		`INSERT INTO users (email, full_name)
+		 VALUES ('other-booking-test@example.com', 'Other Booking Test')
+		 RETURNING id`,
+	).Scan(&otherUserID)
+	if err != nil {
+		t.Fatalf("insert other user: %v", err)
+	}
+
+	_, err = service.CancelBooking(context.Background(), created.ID, otherUserID)
+	if !errors.Is(err, ErrBookingNotFound) {
+		t.Fatalf("CancelBooking() error = %v, want ErrBookingNotFound", err)
+	}
+	assertBookingStatus(t, pool, created.ID, "confirmed")
+	assertAvailabilityRange(t, pool, roomTypeID, 3, 1, 1)
+}
+
+func TestCancelBookingRollsBackPartialAvailabilityUpdate(t *testing.T) {
+	pool, service := newBookingIntegrationService(t)
+	userID, roomTypeID := insertBookingFixtures(t, pool, 2)
+	created, err := service.CreateBooking(
+		context.Background(),
+		futureBookingInput(userID, roomTypeID, 1),
+	)
+	if err != nil {
+		t.Fatalf("CreateBooking() error = %v", err)
+	}
+
+	_, err = pool.Exec(
+		context.Background(),
+		`UPDATE room_type_availability
+		 SET rooms_booked = 0
+		 WHERE room_type_id = $1
+		   AND date = (
+		       SELECT min(date)
+		       FROM room_type_availability
+		       WHERE room_type_id = $1
+		   )`,
+		roomTypeID,
+	)
+	if err != nil {
+		t.Fatalf("corrupt one availability row: %v", err)
+	}
+
+	_, err = service.CancelBooking(context.Background(), created.ID, userID)
+	if !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("CancelBooking() error = %v, want ErrUnavailable", err)
+	}
+	assertBookingStatus(t, pool, created.ID, "confirmed")
+
+	var zeroRows int64
+	var oneRows int64
+	err = pool.QueryRow(
+		context.Background(),
+		`SELECT
+		     count(*) FILTER (WHERE rooms_booked = 0),
+		     count(*) FILTER (WHERE rooms_booked = 1)
+		 FROM room_type_availability
+		 WHERE room_type_id = $1`,
+		roomTypeID,
+	).Scan(&zeroRows, &oneRows)
+	if err != nil {
+		t.Fatalf("query availability after rollback: %v", err)
+	}
+	if zeroRows != 1 || oneRows != 2 {
+		t.Errorf("availability rows: zero=%d one=%d, want zero=1 one=2", zeroRows, oneRows)
+	}
+}
+
+func TestCancelBookingRejectsStartedStay(t *testing.T) {
+	pool, service := newBookingIntegrationService(t)
+	userID, roomTypeID := insertBookingFixtures(t, pool, 2)
+	today := utcDate(time.Now())
+	created, err := service.CreateBooking(context.Background(), CreateInput{
+		UserID:     userID,
+		RoomTypeID: roomTypeID,
+		CheckIn:    today.AddDate(0, 0, -1),
+		CheckOut:   today.AddDate(0, 0, 1),
+		RoomsCount: 1,
+		GuestCount: 1,
+	})
+	if err != nil {
+		t.Fatalf("CreateBooking() error = %v", err)
+	}
+
+	_, err = service.CancelBooking(context.Background(), created.ID, userID)
+	if !errors.Is(err, ErrBookingNotCancellable) {
+		t.Fatalf("CancelBooking() error = %v, want ErrBookingNotCancellable", err)
+	}
+	assertBookingStatus(t, pool, created.ID, "confirmed")
+	assertAvailabilityRange(t, pool, roomTypeID, 2, 1, 1)
+}
+
 func newBookingIntegrationService(t *testing.T) (*pgxpool.Pool, *Service) {
 	t.Helper()
 
@@ -313,6 +494,75 @@ func assertBookingCounts(
 			availabilityRows,
 			wantAvailabilityRows,
 		)
+	}
+}
+
+func futureBookingInput(userID, roomTypeID int64, roomsCount int32) CreateInput {
+	checkIn := utcDate(time.Now()).AddDate(1, 0, 0)
+	return CreateInput{
+		UserID:     userID,
+		RoomTypeID: roomTypeID,
+		CheckIn:    checkIn,
+		CheckOut:   checkIn.AddDate(0, 0, 3),
+		RoomsCount: roomsCount,
+		GuestCount: roomsCount,
+	}
+}
+
+func utcDate(value time.Time) time.Time {
+	value = value.UTC()
+	return time.Date(value.Year(), value.Month(), value.Day(), 0, 0, 0, 0, time.UTC)
+}
+
+func assertAvailabilityRange(
+	t *testing.T,
+	pool *pgxpool.Pool,
+	roomTypeID int64,
+	wantRows int64,
+	wantMinimum int32,
+	wantMaximum int32,
+) {
+	t.Helper()
+
+	var rows int64
+	var minimum int32
+	var maximum int32
+	err := pool.QueryRow(
+		context.Background(),
+		`SELECT count(*), min(rooms_booked), max(rooms_booked)
+		 FROM room_type_availability
+		 WHERE room_type_id = $1`,
+		roomTypeID,
+	).Scan(&rows, &minimum, &maximum)
+	if err != nil {
+		t.Fatalf("query availability range: %v", err)
+	}
+	if rows != wantRows || minimum != wantMinimum || maximum != wantMaximum {
+		t.Errorf(
+			"availability = {rows:%d min:%d max:%d}, want {rows:%d min:%d max:%d}",
+			rows,
+			minimum,
+			maximum,
+			wantRows,
+			wantMinimum,
+			wantMaximum,
+		)
+	}
+}
+
+func assertBookingStatus(t *testing.T, pool *pgxpool.Pool, bookingID int64, want string) {
+	t.Helper()
+
+	var status string
+	if err := pool.QueryRow(
+		context.Background(),
+		"SELECT status FROM bookings WHERE id = $1",
+		bookingID,
+	).Scan(&status); err != nil {
+		t.Fatalf("query booking status: %v", err)
+	}
+	if status != want {
+		t.Errorf("booking status = %q, want %q", status, want)
 	}
 }
 

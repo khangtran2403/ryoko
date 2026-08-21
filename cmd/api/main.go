@@ -113,6 +113,9 @@ func main() {
 			http.HandlerFunc(bookingHandler.CreateBooking),
 		),
 	)
+	mux.Handle("POST /me/bookings/{bookingID}/cancel",
+		authMiddleware.Authenticate(
+			http.HandlerFunc(bookingHandler.CancelBooking)))
 	mux.HandleFunc("POST /auth/register", authHandler.RegisterUser)
 	mux.HandleFunc("POST /auth/login", authHandler.LoginUser)
 
