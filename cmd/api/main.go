@@ -14,6 +14,7 @@ import (
 	"github.com/khangtran2403/ryoko/internal/db/sqlc"
 	"github.com/khangtran2403/ryoko/internal/handler"
 	"github.com/khangtran2403/ryoko/internal/middleware"
+	"github.com/khangtran2403/ryoko/internal/review"
 )
 
 func main() {
@@ -50,6 +51,8 @@ func main() {
 	authMiddleware := middleware.NewAuthMiddleware(tokenManager)
 	bookingService := booking.NewService(pool, queries)
 	bookingHandler := handler.NewBookingHandler(bookingService)
+	reviewSevice := review.NewService(queries)
+	reviewHandler := handler.NewReviewHandler(reviewSevice)
 	adminOnly := func(handler http.HandlerFunc) http.Handler {
 		return authMiddleware.Authenticate(
 			middleware.RequireRole(
@@ -116,6 +119,10 @@ func main() {
 	mux.Handle("POST /me/bookings/{bookingID}/cancel",
 		authMiddleware.Authenticate(
 			http.HandlerFunc(bookingHandler.CancelBooking)))
+	mux.Handle("POST /me/bookings/{bookingID}/review",
+		authMiddleware.Authenticate(http.HandlerFunc(reviewHandler.CreateReview)))
+	mux.HandleFunc("GET /reviews/{reviewID}", reviewHandler.GetReviewByID)
+	mux.HandleFunc("GET /hotels/{hotelID}/reviews", reviewHandler.ListReviewByHotel)
 	mux.HandleFunc("POST /auth/register", authHandler.RegisterUser)
 	mux.HandleFunc("POST /auth/login", authHandler.LoginUser)
 

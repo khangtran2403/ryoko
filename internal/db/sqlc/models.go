@@ -43,6 +43,15 @@ type HotelAmenity struct {
 	AmenityID int64 `json:"amenity_id"`
 }
 
+type Review struct {
+	ID        int64              `json:"id"`
+	BookingID int64              `json:"booking_id"`
+	Rating    int16              `json:"rating"`
+	Comment   pgtype.Text        `json:"comment"`
+	CreatedAt pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt pgtype.Timestamptz `json:"updated_at"`
+}
+
 type RoomType struct {
 	ID            int64              `json:"id"`
 	HotelID       int64              `json:"hotel_id"`
