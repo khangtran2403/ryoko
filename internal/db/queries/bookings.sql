@@ -161,3 +161,10 @@ RETURNING
     status,
     created_at,
     updated_at;
+-- name: CompletePastBookings :execrows
+UPDATE bookings
+SET
+    status = 'completed',
+    updated_at = now()
+WHERE status = 'confirmed'
+  AND check_out <= sqlc.arg(today)::date;

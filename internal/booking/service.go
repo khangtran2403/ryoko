@@ -248,6 +248,26 @@ func (s *Service) CancelBooking(ctx context.Context, bookingID int64, userID int
 	if nights <= 0 {
 		return sqlc.Booking{}, fmt.Errorf("invalid stored booking dates")
 	}
+	now := time.Now().UTC()
+	today := time.Date(
+		now.Year(),
+		now.Month(),
+		now.Day(),
+		0, 0, 0, 0,
+		time.UTC,
+	)
+
+	checkInDate := time.Date(
+		checkIn.Time.Year(),
+		checkIn.Time.Month(),
+		checkIn.Time.Day(),
+		0, 0, 0, 0,
+		time.UTC,
+	)
+
+	if !checkInDate.After(today) {
+		return sqlc.Booking{}, ErrBookingNotCancellable
+	}
 	rows, err := qtx.LockAvailabilityRows(ctx, sqlc.LockAvailabilityRowsParams{
 		RoomTypeID: roomTypeID,
 		CheckIn:    checkIn,
@@ -293,4 +313,25 @@ func (s *Service) CancelBooking(ctx context.Context, bookingID int64, userID int
 		)
 	}
 	return cancel, nil
+}
+func (s *Service) CompletePastBookings(ctx context.Context, now time.Time) (int64, error) {
+	now = now.UTC()
+
+	today := pgtype.Date{
+		Time: time.Date(
+			now.Year(),
+			now.Month(),
+			now.Day(),
+			0, 0, 0, 0,
+			time.UTC,
+		),
+		Valid: true,
+	}
+
+	affected, err := s.queries.CompletePastBookings(ctx, today)
+	if err != nil {
+		return 0, fmt.Errorf("complete past bookings: %w", err)
+	}
+
+	return affected, nil
 }

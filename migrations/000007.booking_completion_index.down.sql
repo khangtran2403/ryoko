@@ -1,0 +1,1 @@
+DROP INDEX IF EXISTS idx_bookings_confirmed_check_out;

@@ -179,7 +179,7 @@ func (h *BookingHandler) CancelBooking(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Booking not found", http.StatusNotFound)
 		return
 	case errors.Is(err, booking.ErrBookingNotCancellable):
-		http.Error(w, "Booking already cancelled", http.StatusConflict)
+		http.Error(w, "Booking cannot be cancelled", http.StatusConflict)
 		return
 	case err != nil:
 		http.Error(w, "cancel booking failed", http.StatusInternalServerError)

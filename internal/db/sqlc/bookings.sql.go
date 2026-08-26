@@ -59,6 +59,23 @@ func (q *Queries) CancelBooking(ctx context.Context, arg CancelBookingParams) (B
 	return i, err
 }
 
+const completePastBookings = `-- name: CompletePastBookings :execrows
+UPDATE bookings
+SET
+    status = 'completed',
+    updated_at = now()
+WHERE status = 'confirmed'
+  AND check_out <= $1::date
+`
+
+func (q *Queries) CompletePastBookings(ctx context.Context, today pgtype.Date) (int64, error) {
+	result, err := q.db.Exec(ctx, completePastBookings, today)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
 const createBooking = `-- name: CreateBooking :one
 INSERT INTO bookings (
     user_id,
