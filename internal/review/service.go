@@ -18,6 +18,7 @@ var (
 	ErrBookingNotReviewable = errors.New("booking cannot be reviewed")
 	ErrReviewAlreadyExists  = errors.New("review already exists")
 	ErrReviewNotFound       = errors.New("review not found")
+	ErrReviewNotEditable    = errors.New("review cannot be edited")
 )
 
 type CreateReview struct {
@@ -25,6 +26,12 @@ type CreateReview struct {
 	Comment   *string `json:"comment"`
 	BookingID int64   `json:"booking_id"`
 	UserID    int64   `json:"user_id"`
+}
+type UpdateReviewInput struct {
+	ReviewID int64
+	UserID   int64
+	Rating   int16
+	Comment  *string
 }
 
 type Service struct {
@@ -110,4 +117,45 @@ func nullableComment(value *string) (pgtype.Text, error) {
 		String: comment,
 		Valid:  true,
 	}, nil
+}
+func (s *Service) UpdateReviewByUser(ctx context.Context, input UpdateReviewInput) (sqlc.Review, error) {
+	if input.UserID <= 0 || input.ReviewID <= 0 {
+		return sqlc.Review{}, ErrBookingNotReviewable
+	}
+	if input.Rating < 1 || input.Rating > 5 {
+		return sqlc.Review{}, ErrInvalidRating
+	}
+	comment, err := nullableComment(input.Comment)
+	if err != nil {
+		return sqlc.Review{}, err
+	}
+	update, err := s.queries.UpdateReviewByUser(ctx, sqlc.UpdateReviewByUserParams{
+		Rating:   input.Rating,
+		Comment:  comment,
+		ReviewID: input.ReviewID,
+		UserID:   input.UserID,
+	})
+	if errors.Is(err, pgx.ErrNoRows) {
+		return sqlc.Review{}, ErrReviewNotEditable
+	}
+	if err != nil {
+		return sqlc.Review{}, fmt.Errorf("Update review : %w", err)
+	}
+	return update, nil
+}
+func (s *Service) DeleteReview(ctx context.Context, reviewID int64, userID int64) (int64, error) {
+	if userID <= 0 || reviewID <= 0 {
+		return 0, ErrBookingNotReviewable
+	}
+	delete, err := s.queries.DeleteReviewByUser(ctx, sqlc.DeleteReviewByUserParams{
+		UserID:   userID,
+		ReviewID: reviewID,
+	})
+	if errors.Is(err, pgx.ErrNoRows) {
+		return 0, ErrReviewNotFound
+	}
+	if err != nil {
+		return 0, fmt.Errorf("delete review : %w", err)
+	}
+	return delete, nil
 }

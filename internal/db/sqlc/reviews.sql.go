@@ -31,7 +31,9 @@ RETURNING
     rating,
     comment,
     created_at,
-    updated_at
+    updated_at,
+    edited_at,
+    deleted_at
 `
 
 type CreateReviewForCompletedBookingParams struct {
@@ -56,8 +58,35 @@ func (q *Queries) CreateReviewForCompletedBooking(ctx context.Context, arg Creat
 		&i.Comment,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.EditedAt,
+		&i.DeletedAt,
 	)
 	return i, err
+}
+
+const deleteReviewByUser = `-- name: DeleteReviewByUser :one
+UPDATE reviews AS r
+SET
+    deleted_at = now(),
+    updated_at = now()
+FROM bookings AS b
+WHERE r.id = $1
+  AND b.id = r.booking_id
+  AND b.user_id = $2
+  AND r.deleted_at IS NULL
+RETURNING r.id
+`
+
+type DeleteReviewByUserParams struct {
+	ReviewID int64 `json:"review_id"`
+	UserID   int64 `json:"user_id"`
+}
+
+func (q *Queries) DeleteReviewByUser(ctx context.Context, arg DeleteReviewByUserParams) (int64, error) {
+	row := q.db.QueryRow(ctx, deleteReviewByUser, arg.ReviewID, arg.UserID)
+	var id int64
+	err := row.Scan(&id)
+	return id, err
 }
 
 const getReviewByID = `-- name: GetReviewByID :one
@@ -78,6 +107,7 @@ JOIN users AS u
 JOIN room_types AS rt
     ON rt.id = b.room_type_id
 WHERE r.id = $1
+  AND r.deleted_at IS NULL
 `
 
 type GetReviewByIDRow struct {
@@ -124,6 +154,7 @@ JOIN users AS u
 JOIN room_types AS rt
     ON rt.id = b.room_type_id
 WHERE rt.hotel_id = $1
+  AND r.deleted_at IS NULL
 ORDER BY r.created_at DESC, r.id DESC
 `
 
@@ -163,4 +194,56 @@ func (q *Queries) ListReviewsByHotel(ctx context.Context, hotelID int64) ([]List
 		return nil, err
 	}
 	return items, nil
+}
+
+const updateReviewByUser = `-- name: UpdateReviewByUser :one
+UPDATE reviews AS r
+SET
+    rating = $1::smallint,
+    comment = $2::text,
+    edited_at = now(),
+    updated_at = now()
+FROM bookings AS b
+WHERE r.id = $3
+  AND b.id = r.booking_id
+  AND b.user_id = $4
+  AND r.edited_at IS NULL
+  AND r.deleted_at IS NULL
+RETURNING
+    r.id,
+    r.booking_id,
+    r.rating,
+    r.comment,
+    r.created_at,
+    r.updated_at,
+    r.edited_at,
+    r.deleted_at
+`
+
+type UpdateReviewByUserParams struct {
+	Rating   int16       `json:"rating"`
+	Comment  pgtype.Text `json:"comment"`
+	ReviewID int64       `json:"review_id"`
+	UserID   int64       `json:"user_id"`
+}
+
+func (q *Queries) UpdateReviewByUser(ctx context.Context, arg UpdateReviewByUserParams) (Review, error) {
+	row := q.db.QueryRow(ctx, updateReviewByUser,
+		arg.Rating,
+		arg.Comment,
+		arg.ReviewID,
+		arg.UserID,
+	)
+	var i Review
+	err := row.Scan(
+		&i.ID,
+		&i.BookingID,
+		&i.Rating,
+		&i.Comment,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.EditedAt,
+		&i.DeletedAt,
+	)
+	return i, err
 }

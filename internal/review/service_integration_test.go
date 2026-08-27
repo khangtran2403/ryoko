@@ -180,6 +180,175 @@ func TestReviewServiceReadNotFoundAndEmptyList(t *testing.T) {
 	}
 }
 
+func TestUpdateReviewAllowsOnlyOneEdit(t *testing.T) {
+	pool, service := newReviewIntegrationService(t)
+	fixtures := insertReviewFixtures(t, pool)
+	created := createReviewFixture(t, service, fixtures.completedBooking, fixtures.ownerID)
+	comment := "  Better wording  "
+
+	updated, err := service.UpdateReviewByUser(context.Background(), UpdateReviewInput{
+		ReviewID: created.ID,
+		UserID:   fixtures.ownerID,
+		Rating:   4,
+		Comment:  &comment,
+	})
+	if err != nil {
+		t.Fatalf("first UpdateReviewByUser() error = %v", err)
+	}
+	if updated.Rating != 4 || !updated.Comment.Valid || updated.Comment.String != "Better wording" {
+		t.Errorf("updated review = %+v", updated)
+	}
+	if !updated.EditedAt.Valid {
+		t.Error("EditedAt is null after successful edit")
+	}
+
+	_, err = service.UpdateReviewByUser(context.Background(), UpdateReviewInput{
+		ReviewID: created.ID,
+		UserID:   fixtures.ownerID,
+		Rating:   2,
+	})
+	if !errors.Is(err, ErrReviewNotEditable) {
+		t.Fatalf("second UpdateReviewByUser() error = %v, want ErrReviewNotEditable", err)
+	}
+
+	got, err := service.GetReviewByID(context.Background(), created.ID)
+	if err != nil {
+		t.Fatalf("GetReviewByID() error = %v", err)
+	}
+	if got.Rating != 4 || !got.Comment.Valid || got.Comment.String != "Better wording" {
+		t.Errorf("stored review after rejected edit = %+v", got)
+	}
+}
+
+func TestConcurrentReviewEditsHaveOneWinner(t *testing.T) {
+	pool, service := newReviewIntegrationService(t)
+	fixtures := insertReviewFixtures(t, pool)
+	created := createReviewFixture(t, service, fixtures.completedBooking, fixtures.ownerID)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	start := make(chan struct{})
+	results := make(chan error, 2)
+	for _, rating := range []int16{2, 4} {
+		rating := rating
+		go func() {
+			<-start
+			_, err := service.UpdateReviewByUser(ctx, UpdateReviewInput{
+				ReviewID: created.ID,
+				UserID:   fixtures.ownerID,
+				Rating:   rating,
+			})
+			results <- err
+		}()
+	}
+	close(start)
+
+	var successes, rejected int
+	for range 2 {
+		err := <-results
+		switch {
+		case err == nil:
+			successes++
+		case errors.Is(err, ErrReviewNotEditable):
+			rejected++
+		default:
+			t.Fatalf("concurrent UpdateReviewByUser() error = %v", err)
+		}
+	}
+	if successes != 1 || rejected != 1 {
+		t.Fatalf("concurrent results = {success:%d rejected:%d}, want {1 1}", successes, rejected)
+	}
+
+	var edited bool
+	if err := pool.QueryRow(
+		context.Background(),
+		"SELECT edited_at IS NOT NULL FROM reviews WHERE id = $1",
+		created.ID,
+	).Scan(&edited); err != nil {
+		t.Fatalf("read edited state: %v", err)
+	}
+	if !edited {
+		t.Error("edited_at is null after concurrent edit")
+	}
+}
+
+func TestReviewMutationsRequireOwner(t *testing.T) {
+	pool, service := newReviewIntegrationService(t)
+	fixtures := insertReviewFixtures(t, pool)
+	created := createReviewFixture(t, service, fixtures.completedBooking, fixtures.ownerID)
+
+	_, err := service.UpdateReviewByUser(context.Background(), UpdateReviewInput{
+		ReviewID: created.ID,
+		UserID:   fixtures.otherUserID,
+		Rating:   2,
+	})
+	if !errors.Is(err, ErrReviewNotEditable) {
+		t.Fatalf("other user UpdateReviewByUser() error = %v, want ErrReviewNotEditable", err)
+	}
+
+	_, err = service.DeleteReview(context.Background(), created.ID, fixtures.otherUserID)
+	if !errors.Is(err, ErrReviewNotFound) {
+		t.Fatalf("other user DeleteReview() error = %v, want ErrReviewNotFound", err)
+	}
+
+	if _, err := service.GetReviewByID(context.Background(), created.ID); err != nil {
+		t.Fatalf("owner's review hidden after rejected mutations: %v", err)
+	}
+}
+
+func TestDeleteReviewHidesPublicReadsAndPreservesStayUniqueness(t *testing.T) {
+	pool, service := newReviewIntegrationService(t)
+	fixtures := insertReviewFixtures(t, pool)
+	created := createReviewFixture(t, service, fixtures.completedBooking, fixtures.ownerID)
+
+	deletedID, err := service.DeleteReview(context.Background(), created.ID, fixtures.ownerID)
+	if err != nil {
+		t.Fatalf("DeleteReview() error = %v", err)
+	}
+	if deletedID != created.ID {
+		t.Errorf("deleted ID = %d, want %d", deletedID, created.ID)
+	}
+
+	_, err = service.GetReviewByID(context.Background(), created.ID)
+	if !errors.Is(err, ErrReviewNotFound) {
+		t.Fatalf("GetReviewByID() after delete error = %v, want ErrReviewNotFound", err)
+	}
+	listed, err := service.ListReviewByHotel(context.Background(), fixtures.hotelID)
+	if err != nil {
+		t.Fatalf("ListReviewByHotel() after delete error = %v", err)
+	}
+	if len(listed) != 0 {
+		t.Errorf("ListReviewByHotel() after delete = %+v, want empty", listed)
+	}
+
+	_, err = service.DeleteReview(context.Background(), created.ID, fixtures.ownerID)
+	if !errors.Is(err, ErrReviewNotFound) {
+		t.Fatalf("second DeleteReview() error = %v, want ErrReviewNotFound", err)
+	}
+	_, err = service.CreateReview(context.Background(), CreateReview{
+		Rating:    3,
+		BookingID: fixtures.completedBooking,
+		UserID:    fixtures.ownerID,
+	})
+	if !errors.Is(err, ErrReviewAlreadyExists) {
+		t.Fatalf("CreateReview() after delete error = %v, want ErrReviewAlreadyExists", err)
+	}
+}
+
+func createReviewFixture(t *testing.T, service *Service, bookingID, userID int64) sqlc.Review {
+	t.Helper()
+
+	created, err := service.CreateReview(context.Background(), CreateReview{
+		Rating:    5,
+		BookingID: bookingID,
+		UserID:    userID,
+	})
+	if err != nil {
+		t.Fatalf("CreateReview() fixture error = %v", err)
+	}
+	return created
+}
+
 func newReviewIntegrationService(t *testing.T) (*pgxpool.Pool, *Service) {
 	t.Helper()
 

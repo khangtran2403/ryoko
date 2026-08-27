@@ -30,6 +30,35 @@ type fakeReviewService struct {
 	listHotelID  int64
 	listResult   []sqlc.ListReviewsByHotelRow
 	listErr      error
+	updateCalled bool
+	updateInput  review.UpdateReviewInput
+	updateResult sqlc.Review
+	updateErr    error
+	deleteCalled bool
+	deleteID     int64
+	deleteUserID int64
+	deleteResult int64
+	deleteErr    error
+}
+
+func (f *fakeReviewService) UpdateReviewByUser(
+	_ context.Context,
+	input review.UpdateReviewInput,
+) (sqlc.Review, error) {
+	f.updateCalled = true
+	f.updateInput = input
+	return f.updateResult, f.updateErr
+}
+
+func (f *fakeReviewService) DeleteReview(
+	_ context.Context,
+	reviewID int64,
+	userID int64,
+) (int64, error) {
+	f.deleteCalled = true
+	f.deleteID = reviewID
+	f.deleteUserID = userID
+	return f.deleteResult, f.deleteErr
 }
 
 func (f *fakeReviewService) CreateReview(
@@ -320,6 +349,158 @@ func TestReviewHandlerListReviewByHotelHandlesInvalidIDAndErrors(t *testing.T) {
 	}
 }
 
+func TestReviewHandlerUpdateReview(t *testing.T) {
+	service := &fakeReviewService{updateResult: sqlc.Review{
+		ID:        91,
+		BookingID: 77,
+		Rating:    4,
+		Comment:   pgtype.Text{String: "Updated review", Valid: true},
+	}}
+	mux, token := newReviewTestMux(t, service, 42)
+
+	recorder := performReviewRequest(
+		mux,
+		http.MethodPut,
+		token,
+		"/me/reviews/91",
+		`{"rating":4,"comment":"Updated review"}`,
+	)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body = %s", recorder.Code, http.StatusOK, recorder.Body.String())
+	}
+	if !service.updateCalled {
+		t.Fatal("review service was not called")
+	}
+	if service.updateInput.ReviewID != 91 || service.updateInput.UserID != 42 {
+		t.Errorf("identity input = {review:%d user:%d}, want {91 42}", service.updateInput.ReviewID, service.updateInput.UserID)
+	}
+	if service.updateInput.Rating != 4 || service.updateInput.Comment == nil || *service.updateInput.Comment != "Updated review" {
+		t.Errorf("update input = %+v", service.updateInput)
+	}
+	if !strings.HasPrefix(recorder.Header().Get("Content-Type"), "application/json") {
+		t.Errorf("Content-Type = %q, want application/json", recorder.Header().Get("Content-Type"))
+	}
+}
+
+func TestReviewHandlerUpdateReviewRejectsInvalidRequest(t *testing.T) {
+	tests := []struct {
+		name string
+		path string
+		body string
+	}{
+		{name: "invalid review ID", path: "/me/reviews/nope", body: `{"rating":4}`},
+		{name: "non-positive review ID", path: "/me/reviews/0", body: `{"rating":4}`},
+		{name: "malformed JSON", path: "/me/reviews/91", body: `{"rating":`},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			service := &fakeReviewService{}
+			mux, token := newReviewTestMux(t, service, 42)
+			recorder := performReviewRequest(mux, http.MethodPut, token, tt.path, tt.body)
+
+			if recorder.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want %d; body = %s", recorder.Code, http.StatusBadRequest, recorder.Body.String())
+			}
+			if service.updateCalled {
+				t.Fatal("review service was called for an invalid request")
+			}
+		})
+	}
+}
+
+func TestReviewHandlerUpdateReviewMapsServiceErrors(t *testing.T) {
+	tests := []struct {
+		name       string
+		err        error
+		wantStatus int
+	}{
+		{name: "invalid rating", err: review.ErrInvalidRating, wantStatus: http.StatusBadRequest},
+		{name: "blank comment", err: review.ErrBlankComment, wantStatus: http.StatusBadRequest},
+		{name: "not editable", err: review.ErrReviewNotEditable, wantStatus: http.StatusConflict},
+		{name: "unexpected", err: errors.New("database unavailable"), wantStatus: http.StatusInternalServerError},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			service := &fakeReviewService{updateErr: tt.err}
+			mux, token := newReviewTestMux(t, service, 42)
+			recorder := performReviewRequest(mux, http.MethodPut, token, "/me/reviews/91", `{"rating":4}`)
+
+			if recorder.Code != tt.wantStatus {
+				t.Fatalf("status = %d, want %d; body = %s", recorder.Code, tt.wantStatus, recorder.Body.String())
+			}
+		})
+	}
+}
+
+func TestReviewHandlerDeleteReview(t *testing.T) {
+	service := &fakeReviewService{deleteResult: 91}
+	mux, token := newReviewTestMux(t, service, 42)
+
+	recorder := performReviewRequest(mux, http.MethodDelete, token, "/me/reviews/91", "")
+
+	if recorder.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, want %d; body = %s", recorder.Code, http.StatusNoContent, recorder.Body.String())
+	}
+	if recorder.Body.Len() != 0 {
+		t.Errorf("body = %q, want empty", recorder.Body.String())
+	}
+	if !service.deleteCalled || service.deleteID != 91 || service.deleteUserID != 42 {
+		t.Errorf("delete call = {called:%v review:%d user:%d}, want {true 91 42}", service.deleteCalled, service.deleteID, service.deleteUserID)
+	}
+}
+
+func TestReviewHandlerDeleteReviewHandlesInvalidIDAndErrors(t *testing.T) {
+	tests := []struct {
+		name       string
+		path       string
+		err        error
+		wantStatus int
+		wantBody   string
+		wantCalled bool
+	}{
+		{name: "invalid ID", path: "/me/reviews/nope", wantStatus: http.StatusBadRequest},
+		{name: "non-positive ID", path: "/me/reviews/0", wantStatus: http.StatusBadRequest},
+		{name: "not found", path: "/me/reviews/91", err: review.ErrReviewNotFound, wantStatus: http.StatusNotFound, wantBody: "review not found\n", wantCalled: true},
+		{name: "unexpected", path: "/me/reviews/91", err: errors.New("database unavailable"), wantStatus: http.StatusInternalServerError, wantCalled: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			service := &fakeReviewService{deleteErr: tt.err}
+			mux, token := newReviewTestMux(t, service, 42)
+			recorder := performReviewRequest(mux, http.MethodDelete, token, tt.path, "")
+
+			if recorder.Code != tt.wantStatus {
+				t.Fatalf("status = %d, want %d; body = %s", recorder.Code, tt.wantStatus, recorder.Body.String())
+			}
+			if tt.wantBody != "" && recorder.Body.String() != tt.wantBody {
+				t.Errorf("body = %q, want %q", recorder.Body.String(), tt.wantBody)
+			}
+			if service.deleteCalled != tt.wantCalled {
+				t.Errorf("service called = %v, want %v", service.deleteCalled, tt.wantCalled)
+			}
+		})
+	}
+}
+
+func TestReviewHandlerMutationsRejectUnauthenticatedRequests(t *testing.T) {
+	service := &fakeReviewService{}
+	mux, _ := newReviewTestMux(t, service, 42)
+
+	for _, method := range []string{http.MethodPut, http.MethodDelete} {
+		recorder := performReviewRequest(mux, method, "", "/me/reviews/91", `{"rating":4}`)
+		if recorder.Code != http.StatusUnauthorized {
+			t.Errorf("%s status = %d, want %d", method, recorder.Code, http.StatusUnauthorized)
+		}
+	}
+	if service.updateCalled || service.deleteCalled {
+		t.Fatal("review service was called for an unauthenticated request")
+	}
+}
+
 func newReviewTestMux(t *testing.T, service reviewService, userID int64) (*http.ServeMux, string) {
 	t.Helper()
 
@@ -346,6 +527,14 @@ func newReviewTestMux(t *testing.T, service reviewService, userID int64) (*http.
 	)
 	mux.HandleFunc("GET /reviews/{reviewID}", handler.GetReviewByID)
 	mux.HandleFunc("GET /hotels/{hotelID}/reviews", handler.ListReviewByHotel)
+	mux.Handle(
+		"PUT /me/reviews/{reviewID}",
+		authMiddleware.Authenticate(http.HandlerFunc(handler.UpdateReviewByUser)),
+	)
+	mux.Handle(
+		"DELETE /me/reviews/{reviewID}",
+		authMiddleware.Authenticate(http.HandlerFunc(handler.DeleteReview)),
+	)
 
 	return mux, token
 }

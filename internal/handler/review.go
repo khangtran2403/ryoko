@@ -16,6 +16,8 @@ type reviewService interface {
 	CreateReview(ctx context.Context, input review.CreateReview) (sqlc.Review, error)
 	GetReviewByID(ctx context.Context, reviewID int64) (sqlc.GetReviewByIDRow, error)
 	ListReviewByHotel(ctx context.Context, hotelID int64) ([]sqlc.ListReviewsByHotelRow, error)
+	UpdateReviewByUser(ctx context.Context, input review.UpdateReviewInput) (sqlc.Review, error)
+	DeleteReview(ctx context.Context, reviewID int64, userID int64) (int64, error)
 }
 
 type ReviewHandler struct {
@@ -128,4 +130,79 @@ func (h ReviewHandler) ListReviewByHotel(w http.ResponseWriter, r *http.Request)
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	json.NewEncoder(w).Encode(getReview)
+}
+func (h *ReviewHandler) UpdateReviewByUser(w http.ResponseWriter, r *http.Request) {
+	var req CreateReviewRequest
+	reviewID := r.PathValue("reviewID")
+	convID, err := strconv.ParseInt(reviewID, 10, 64)
+	if err != nil {
+		http.Error(w, "Invalid review ID", http.StatusBadRequest)
+		return
+	}
+	if convID <= 0 {
+		http.Error(w, "review ID must be positive", http.StatusBadRequest)
+		return
+	}
+	principal, ok := middleware.PrincipalFromContext(r.Context())
+	if !ok {
+		w.Header().Set("WWW-Authenticate", "Bearer")
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+	err = json.NewDecoder(r.Body).Decode(&req)
+	if err != nil {
+		http.Error(w, "Invalid request body", http.StatusBadRequest)
+		return
+	}
+	update, err := h.service.UpdateReviewByUser(r.Context(), review.UpdateReviewInput{
+		ReviewID: convID,
+		UserID:   principal.UserID,
+		Rating:   req.Rating,
+		Comment:  req.Comment,
+	})
+	switch {
+	case errors.Is(err, review.ErrInvalidRating),
+		errors.Is(err, review.ErrBlankComment):
+		http.Error(w, err.Error(), http.StatusBadRequest)
+
+	case errors.Is(err, review.ErrReviewNotEditable):
+		http.Error(w, "Review cannot be edited", http.StatusConflict)
+
+	case err != nil:
+		http.Error(w, "update review failed", http.StatusInternalServerError)
+	default:
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		json.NewEncoder(w).Encode(update)
+	}
+}
+func (h *ReviewHandler) DeleteReview(w http.ResponseWriter, r *http.Request) {
+	reviewID := r.PathValue("reviewID")
+	convID, err := strconv.ParseInt(reviewID, 10, 64)
+	if err != nil {
+		http.Error(w, "Invalid review ID", http.StatusBadRequest)
+		return
+	}
+	if convID <= 0 {
+		http.Error(w, "review ID must be positive", http.StatusBadRequest)
+		return
+	}
+	principal, ok := middleware.PrincipalFromContext(r.Context())
+	if !ok {
+		w.Header().Set("WWW-Authenticate", "Bearer")
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+	_, err = h.service.DeleteReview(r.Context(), convID, principal.UserID)
+
+	if errors.Is(err, review.ErrReviewNotFound) {
+		http.Error(w, "review not found", http.StatusNotFound)
+		return
+	}
+	if err != nil {
+		http.Error(w, "delete review failed", http.StatusInternalServerError)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+
 }

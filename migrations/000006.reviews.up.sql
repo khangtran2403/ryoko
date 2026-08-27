@@ -7,6 +7,8 @@ CREATE TABLE reviews (
     comment    TEXT,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    edited_at TIMESTAMPTZ,
+    deleted_at TIMESTAMPTZ,
 
     CHECK (comment IS NULL OR btrim(comment) <> '')
 );
