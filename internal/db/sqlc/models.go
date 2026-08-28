@@ -43,6 +43,14 @@ type HotelAmenity struct {
 	AmenityID int64 `json:"amenity_id"`
 }
 
+type HotelImage struct {
+	ID        int64              `json:"id"`
+	HotelID   int64              `json:"hotel_id"`
+	ImageUrl  string             `json:"image_url"`
+	IsPrimary bool               `json:"is_primary"`
+	CreatedAt pgtype.Timestamptz `json:"created_at"`
+}
+
 type Review struct {
 	ID        int64              `json:"id"`
 	BookingID int64              `json:"booking_id"`
@@ -50,6 +58,8 @@ type Review struct {
 	Comment   pgtype.Text        `json:"comment"`
 	CreatedAt pgtype.Timestamptz `json:"created_at"`
 	UpdatedAt pgtype.Timestamptz `json:"updated_at"`
+	EditedAt  pgtype.Timestamptz `json:"edited_at"`
+	DeletedAt pgtype.Timestamptz `json:"deleted_at"`
 }
 
 type RoomType struct {

@@ -6,18 +6,25 @@ package sqlc
 
 import (
 	"context"
+
+	"github.com/jackc/pgx/v5/pgtype"
 )
 
 type Querier interface {
 	AddAmenityToHotel(ctx context.Context, arg AddAmenityToHotelParams) (HotelAmenity, error)
 	CancelBooking(ctx context.Context, arg CancelBookingParams) (Booking, error)
+	ClearPrimaryHotelImage(ctx context.Context, hotelID int64) error
+	CompletePastBookings(ctx context.Context, today pgtype.Date) (int64, error)
 	CreateAmenity(ctx context.Context, name string) (Amenity, error)
 	CreateBooking(ctx context.Context, arg CreateBookingParams) (Booking, error)
 	CreateHotel(ctx context.Context, arg CreateHotelParams) (Hotel, error)
+	CreateHotelImage(ctx context.Context, arg CreateHotelImageParams) (HotelImage, error)
 	CreateReviewForCompletedBooking(ctx context.Context, arg CreateReviewForCompletedBookingParams) (Review, error)
 	CreateRoomType(ctx context.Context, arg CreateRoomTypeParams) (RoomType, error)
 	DecrementAvailability(ctx context.Context, arg DecrementAvailabilityParams) (int64, error)
 	DeleteHotel(ctx context.Context, id int64) (int64, error)
+	DeleteHotelImage(ctx context.Context, arg DeleteHotelImageParams) (int64, error)
+	DeleteReviewByUser(ctx context.Context, arg DeleteReviewByUserParams) (int64, error)
 	DeleteRoomType(ctx context.Context, id int64) (int64, error)
 	DeleteUser(ctx context.Context, id int64) (int64, error)
 	EnsureAvailabilityRows(ctx context.Context, arg EnsureAvailabilityRowsParams) error
@@ -33,13 +40,17 @@ type Querier interface {
 	ListAmenities(ctx context.Context) ([]Amenity, error)
 	ListAmenitiesByHotel(ctx context.Context, hotelID int64) ([]Amenity, error)
 	ListBookingsByUser(ctx context.Context, userID int64) ([]Booking, error)
+	ListHotelImages(ctx context.Context, hotelID int64) ([]HotelImage, error)
 	ListHotelsByCity(ctx context.Context, city string) ([]Hotel, error)
 	ListReviewsByHotel(ctx context.Context, hotelID int64) ([]ListReviewsByHotelRow, error)
 	ListRoomTypesByHotel(ctx context.Context, hotelID int64) ([]RoomType, error)
 	LockAvailabilityRows(ctx context.Context, arg LockAvailabilityRowsParams) ([]LockAvailabilityRowsRow, error)
+	LockHotelForImageUpdate(ctx context.Context, hotelID int64) (int64, error)
 	RegisterUser(ctx context.Context, arg RegisterUserParams) (RegisterUserRow, error)
 	RemoveAmenityFromHotel(ctx context.Context, arg RemoveAmenityFromHotelParams) (int64, error)
+	SetPrimaryHotelImage(ctx context.Context, arg SetPrimaryHotelImageParams) (HotelImage, error)
 	UpdateHotel(ctx context.Context, arg UpdateHotelParams) (Hotel, error)
+	UpdateReviewByUser(ctx context.Context, arg UpdateReviewByUserParams) (Review, error)
 	UpdateRoomType(ctx context.Context, arg UpdateRoomTypeParams) (RoomType, error)
 	UpdateUser(ctx context.Context, arg UpdateUserParams) (UpdateUserRow, error)
 }

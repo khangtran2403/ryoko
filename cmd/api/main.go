@@ -18,6 +18,7 @@ import (
 	"github.com/khangtran2403/ryoko/internal/config"
 	"github.com/khangtran2403/ryoko/internal/db/sqlc"
 	"github.com/khangtran2403/ryoko/internal/handler"
+	hotelimages "github.com/khangtran2403/ryoko/internal/hotel_images"
 	"github.com/khangtran2403/ryoko/internal/middleware"
 	"github.com/khangtran2403/ryoko/internal/review"
 )
@@ -65,6 +66,8 @@ func main() {
 	bookingHandler := handler.NewBookingHandler(bookingService)
 	reviewSevice := review.NewService(queries)
 	reviewHandler := handler.NewReviewHandler(reviewSevice)
+	hotelImageService := hotelimages.NewService(pool, queries)
+	hotelImageHandler := handler.NewHotelImageHandler(hotelImageService)
 	adminOnly := func(handler http.HandlerFunc) http.Handler {
 		return authMiddleware.Authenticate(
 			middleware.RequireRole(
@@ -139,6 +142,25 @@ func main() {
 		authMiddleware.Authenticate(http.HandlerFunc(reviewHandler.UpdateReviewByUser)))
 	mux.Handle("DELETE /me/reviews/{reviewID}",
 		authMiddleware.Authenticate(http.HandlerFunc(reviewHandler.DeleteReview)))
+	mux.Handle(
+		"POST /hotels/{hotelID}/images",
+		adminOnly(hotelImageHandler.CreateHotelImage),
+	)
+
+	mux.HandleFunc(
+		"GET /hotels/{hotelID}/images",
+		hotelImageHandler.ListHotelImages,
+	)
+
+	mux.Handle(
+		"PUT /hotels/{hotelID}/images/{imageID}/primary",
+		adminOnly(hotelImageHandler.SetPrimaryHotelImage),
+	)
+
+	mux.Handle(
+		"DELETE /hotels/{hotelID}/images/{imageID}",
+		adminOnly(hotelImageHandler.DeleteHotelImage),
+	)
 	mux.HandleFunc("POST /auth/register", authHandler.RegisterUser)
 	mux.HandleFunc("POST /auth/login", authHandler.LoginUser)
 
