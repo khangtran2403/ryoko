@@ -83,6 +83,91 @@ func (q *Queries) GetRoomTypeByID(ctx context.Context, id int64) (RoomType, erro
 	return i, err
 }
 
+const listAvailableRoomTypes = `-- name: ListAvailableRoomTypes :many
+SELECT
+    rt.id,
+    rt.hotel_id,
+    rt.name,
+    rt.description,
+    rt.price_per_night,
+    rt.capacity,
+    rt.total_rooms,
+    rt.created_at,
+    (
+        rt.total_rooms
+        - COALESCE(MAX(rta.rooms_booked), 0)
+    )::int AS rooms_available
+FROM room_types AS rt
+LEFT JOIN room_type_availability AS rta
+    ON rta.room_type_id = rt.id
+   AND rta.date >= $1::date
+   AND rta.date < $2::date
+WHERE rt.hotel_id = $3
+GROUP BY rt.id
+HAVING
+    rt.total_rooms - COALESCE(MAX(rta.rooms_booked), 0)
+        >= $4::int
+    AND rt.capacity * $4::int
+        >= $5::int
+ORDER BY rt.price_per_night, rt.id
+`
+
+type ListAvailableRoomTypesParams struct {
+	CheckIn    pgtype.Date `json:"check_in"`
+	CheckOut   pgtype.Date `json:"check_out"`
+	HotelID    int64       `json:"hotel_id"`
+	RoomsCount int32       `json:"rooms_count"`
+	GuestCount int32       `json:"guest_count"`
+}
+
+type ListAvailableRoomTypesRow struct {
+	ID             int64              `json:"id"`
+	HotelID        int64              `json:"hotel_id"`
+	Name           string             `json:"name"`
+	Description    pgtype.Text        `json:"description"`
+	PricePerNight  pgtype.Numeric     `json:"price_per_night"`
+	Capacity       int32              `json:"capacity"`
+	TotalRooms     int32              `json:"total_rooms"`
+	CreatedAt      pgtype.Timestamptz `json:"created_at"`
+	RoomsAvailable int32              `json:"rooms_available"`
+}
+
+func (q *Queries) ListAvailableRoomTypes(ctx context.Context, arg ListAvailableRoomTypesParams) ([]ListAvailableRoomTypesRow, error) {
+	rows, err := q.db.Query(ctx, listAvailableRoomTypes,
+		arg.CheckIn,
+		arg.CheckOut,
+		arg.HotelID,
+		arg.RoomsCount,
+		arg.GuestCount,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListAvailableRoomTypesRow
+	for rows.Next() {
+		var i ListAvailableRoomTypesRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.HotelID,
+			&i.Name,
+			&i.Description,
+			&i.PricePerNight,
+			&i.Capacity,
+			&i.TotalRooms,
+			&i.CreatedAt,
+			&i.RoomsAvailable,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listRoomTypesByHotel = `-- name: ListRoomTypesByHotel :many
 SELECT id, hotel_id, name, description, price_per_night, capacity, total_rooms, created_at FROM room_types
 WHERE hotel_id = $1

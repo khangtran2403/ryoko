@@ -22,6 +22,8 @@ var (
 	ErrInvalidUser           = errors.New("invalid user")
 	ErrBookingNotFound       = errors.New("booking not found")
 	ErrBookingNotCancellable = errors.New("booking cannot be cancelled")
+	ErrInvalidHotelID        = errors.New("hotel ID must be positive")
+	ErrCheckInInPast         = errors.New("check-in date cannot be in the past")
 )
 
 type CreateInput struct {
@@ -32,37 +34,32 @@ type CreateInput struct {
 	RoomsCount int32     `json:"rooms_count"`
 	GuestCount int32     `json:"guest_count"`
 }
+type AvailabilityInput struct {
+	HotelID    int64
+	CheckIn    time.Time
+	CheckOut   time.Time
+	RoomsCount int32
+	GuestCount int32
+}
 type Service struct {
 	pool    *pgxpool.Pool
 	queries *sqlc.Queries
+	now     func() time.Time
 }
 
 func NewService(pool *pgxpool.Pool, queries *sqlc.Queries) *Service {
 	return &Service{
 		pool:    pool,
 		queries: queries,
+		now:     time.Now,
 	}
 }
 
 func (s *Service) CreateBooking(ctx context.Context, input CreateInput) (sqlc.Booking, error) {
 	// Validate input
-	checkInDate := time.Date(
-		input.CheckIn.Year(),
-		input.CheckIn.Month(),
-		input.CheckIn.Day(),
-		0, 0, 0, 0,
-		time.UTC,
-	)
-
-	checkOutDate := time.Date(
-		input.CheckOut.Year(),
-		input.CheckOut.Month(),
-		input.CheckOut.Day(),
-		0, 0, 0, 0,
-		time.UTC,
-	)
-	if !checkOutDate.After(checkInDate) {
-		return sqlc.Booking{}, ErrInvalidDates
+	checkInDate, checkOutDate, err := s.validateStayDates(input.CheckIn, input.CheckOut)
+	if err != nil {
+		return sqlc.Booking{}, err
 	}
 	if input.RoomsCount <= 0 {
 		return sqlc.Booking{}, ErrInvalidRooms
@@ -248,15 +245,7 @@ func (s *Service) CancelBooking(ctx context.Context, bookingID int64, userID int
 	if nights <= 0 {
 		return sqlc.Booking{}, fmt.Errorf("invalid stored booking dates")
 	}
-	now := time.Now().UTC()
-	today := time.Date(
-		now.Year(),
-		now.Month(),
-		now.Day(),
-		0, 0, 0, 0,
-		time.UTC,
-	)
-
+	today := dateOnlyUTC(s.now())
 	checkInDate := time.Date(
 		checkIn.Time.Year(),
 		checkIn.Time.Month(),
@@ -334,4 +323,62 @@ func (s *Service) CompletePastBookings(ctx context.Context, now time.Time) (int6
 	}
 
 	return affected, nil
+}
+
+func (s *Service) ListAvailableRoomTypes(ctx context.Context, input AvailabilityInput) ([]sqlc.ListAvailableRoomTypesRow, error) {
+	if input.HotelID <= 0 {
+		return nil, ErrInvalidHotelID
+	}
+	checkInDate, checkOutDate, err := s.validateStayDates(input.CheckIn, input.CheckOut)
+	if err != nil {
+		return nil, err
+	}
+	if input.RoomsCount <= 0 {
+		return nil, ErrInvalidRooms
+	}
+	if input.GuestCount <= 0 {
+		return nil, ErrInvalidGuests
+	}
+	search, err := s.queries.ListAvailableRoomTypes(ctx, sqlc.ListAvailableRoomTypesParams{
+		CheckIn:    pgtype.Date{Time: checkInDate, Valid: true},
+		CheckOut:   pgtype.Date{Time: checkOutDate, Valid: true},
+		HotelID:    input.HotelID,
+		RoomsCount: input.RoomsCount,
+		GuestCount: input.GuestCount,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("search available room types: %w", err)
+	}
+	if search == nil {
+		search = []sqlc.ListAvailableRoomTypesRow{}
+	}
+	return search, nil
+}
+func dateOnlyUTC(value time.Time) time.Time {
+	return time.Date(
+		value.Year(),
+		value.Month(),
+		value.Day(),
+		0, 0, 0, 0,
+		time.UTC,
+	)
+}
+
+func (s *Service) validateStayDates(
+	checkIn time.Time,
+	checkOut time.Time,
+) (time.Time, time.Time, error) {
+	checkInDate := dateOnlyUTC(checkIn)
+	checkOutDate := dateOnlyUTC(checkOut)
+	today := dateOnlyUTC(s.now())
+
+	if checkInDate.Before(today) {
+		return time.Time{}, time.Time{}, ErrCheckInInPast
+	}
+
+	if !checkOutDate.After(checkInDate) {
+		return time.Time{}, time.Time{}, ErrInvalidDates
+	}
+
+	return checkInDate, checkOutDate, nil
 }

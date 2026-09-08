@@ -17,21 +17,25 @@ import (
 )
 
 type fakeBookingCreator struct {
-	called        bool
-	input         booking.CreateInput
-	booking       sqlc.Booking
-	err           error
-	getCalled     bool
-	bookingID     int64
-	userID        int64
-	getBooking    sqlc.Booking
-	getErr        error
-	listCalled    bool
-	listBookings  []sqlc.Booking
-	listErr       error
-	cancelCalled  bool
-	cancelBooking sqlc.Booking
-	cancelErr     error
+	called             bool
+	input              booking.CreateInput
+	booking            sqlc.Booking
+	err                error
+	getCalled          bool
+	bookingID          int64
+	userID             int64
+	getBooking         sqlc.Booking
+	getErr             error
+	listCalled         bool
+	listBookings       []sqlc.Booking
+	listErr            error
+	cancelCalled       bool
+	cancelBooking      sqlc.Booking
+	cancelErr          error
+	availabilityCalled bool
+	availabilityInput  booking.AvailabilityInput
+	availabilityResult []sqlc.ListAvailableRoomTypesRow
+	availabilityErr    error
 }
 
 func (f *fakeBookingCreator) CreateBooking(_ context.Context, input booking.CreateInput) (sqlc.Booking, error) {
@@ -221,6 +225,7 @@ func TestBookingHandlerCreateBookingMapsServiceErrors(t *testing.T) {
 		wantStatus int
 	}{
 		{name: "invalid dates", err: booking.ErrInvalidDates, wantStatus: http.StatusBadRequest},
+		{name: "check-in in past", err: booking.ErrCheckInInPast, wantStatus: http.StatusBadRequest},
 		{name: "invalid rooms", err: booking.ErrInvalidRooms, wantStatus: http.StatusBadRequest},
 		{name: "invalid guests", err: booking.ErrInvalidGuests, wantStatus: http.StatusBadRequest},
 		{name: "capacity exceeded", err: booking.ErrCapacityExceeded, wantStatus: http.StatusBadRequest},
@@ -482,7 +487,138 @@ func TestBookingHandlerCancelBookingRejectsInvalidID(t *testing.T) {
 		t.Fatal("booking service was called for an invalid booking ID")
 	}
 }
+func (f *fakeBookingCreator) ListAvailableRoomTypes(
+	_ context.Context,
+	input booking.AvailabilityInput,
+) ([]sqlc.ListAvailableRoomTypesRow, error) {
+	f.availabilityCalled = true
+	f.availabilityInput = input
+	return f.availabilityResult, f.availabilityErr
+}
 
+func TestBookingHandlerListAvailableRoomTypes(t *testing.T) {
+	service := &fakeBookingCreator{availabilityResult: []sqlc.ListAvailableRoomTypesRow{
+		{ID: 7, HotelID: 12, Name: "Standard", TotalRooms: 5, RoomsAvailable: 2},
+	}}
+	mux, _ := newAuthenticatedBookingMux(t, service, 42)
+
+	recorder := performBookingGET(
+		mux,
+		"",
+		"/hotels/12/available-room-types?check_in=2030-01-10&check_out=2030-01-13&rooms_count=2&guest_count=3",
+	)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body = %s", recorder.Code, http.StatusOK, recorder.Body.String())
+	}
+	if !service.availabilityCalled {
+		t.Fatal("availability service was not called")
+	}
+	if service.availabilityInput.HotelID != 12 ||
+		service.availabilityInput.RoomsCount != 2 ||
+		service.availabilityInput.GuestCount != 3 {
+		t.Errorf("availability input = %+v", service.availabilityInput)
+	}
+	assertDate(t, service.availabilityInput.CheckIn, "2030-01-10")
+	assertDate(t, service.availabilityInput.CheckOut, "2030-01-13")
+	if !strings.HasPrefix(recorder.Header().Get("Content-Type"), "application/json") {
+		t.Errorf("Content-Type = %q, want application/json", recorder.Header().Get("Content-Type"))
+	}
+
+	var response []sqlc.ListAvailableRoomTypesRow
+	if err := json.NewDecoder(recorder.Body).Decode(&response); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if len(response) != 1 || response[0].ID != 7 || response[0].RoomsAvailable != 2 {
+		t.Errorf("response = %+v", response)
+	}
+}
+
+func TestBookingHandlerListAvailableRoomTypesRejectsInvalidQuery(t *testing.T) {
+	validQuery := "?check_in=2030-01-10&check_out=2030-01-13&rooms_count=1&guest_count=2"
+	tests := []struct {
+		name string
+		path string
+	}{
+		{name: "invalid hotel ID", path: "/hotels/nope/available-room-types" + validQuery},
+		{name: "non-positive hotel ID", path: "/hotels/0/available-room-types" + validQuery},
+		{name: "missing check-in", path: "/hotels/12/available-room-types?check_out=2030-01-13&rooms_count=1&guest_count=2"},
+		{name: "invalid check-in", path: "/hotels/12/available-room-types?check_in=10-01-2030&check_out=2030-01-13&rooms_count=1&guest_count=2"},
+		{name: "missing check-out", path: "/hotels/12/available-room-types?check_in=2030-01-10&rooms_count=1&guest_count=2"},
+		{name: "invalid check-out", path: "/hotels/12/available-room-types?check_in=2030-01-10&check_out=13-01-2030&rooms_count=1&guest_count=2"},
+		{name: "missing rooms", path: "/hotels/12/available-room-types?check_in=2030-01-10&check_out=2030-01-13&guest_count=2"},
+		{name: "non-numeric rooms", path: "/hotels/12/available-room-types?check_in=2030-01-10&check_out=2030-01-13&rooms_count=many&guest_count=2"},
+		{name: "non-positive rooms", path: "/hotels/12/available-room-types?check_in=2030-01-10&check_out=2030-01-13&rooms_count=0&guest_count=2"},
+		{name: "rooms overflow", path: "/hotels/12/available-room-types?check_in=2030-01-10&check_out=2030-01-13&rooms_count=2147483648&guest_count=2"},
+		{name: "missing guests", path: "/hotels/12/available-room-types?check_in=2030-01-10&check_out=2030-01-13&rooms_count=1"},
+		{name: "non-numeric guests", path: "/hotels/12/available-room-types?check_in=2030-01-10&check_out=2030-01-13&rooms_count=1&guest_count=many"},
+		{name: "non-positive guests", path: "/hotels/12/available-room-types?check_in=2030-01-10&check_out=2030-01-13&rooms_count=1&guest_count=-1"},
+		{name: "guests overflow", path: "/hotels/12/available-room-types?check_in=2030-01-10&check_out=2030-01-13&rooms_count=1&guest_count=2147483648"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			service := &fakeBookingCreator{}
+			mux, _ := newAuthenticatedBookingMux(t, service, 42)
+			recorder := performBookingGET(mux, "", tt.path)
+
+			if recorder.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want %d; body = %s", recorder.Code, http.StatusBadRequest, recorder.Body.String())
+			}
+			if service.availabilityCalled {
+				t.Fatal("availability service was called for invalid query")
+			}
+		})
+	}
+}
+
+func TestBookingHandlerListAvailableRoomTypesMapsServiceErrors(t *testing.T) {
+	tests := []struct {
+		name       string
+		err        error
+		wantStatus int
+	}{
+		{name: "invalid hotel", err: booking.ErrInvalidHotelID, wantStatus: http.StatusBadRequest},
+		{name: "invalid dates", err: booking.ErrInvalidDates, wantStatus: http.StatusBadRequest},
+		{name: "check-in in past", err: booking.ErrCheckInInPast, wantStatus: http.StatusBadRequest},
+		{name: "invalid rooms", err: booking.ErrInvalidRooms, wantStatus: http.StatusBadRequest},
+		{name: "invalid guests", err: booking.ErrInvalidGuests, wantStatus: http.StatusBadRequest},
+		{name: "unexpected", err: errors.New("database unavailable"), wantStatus: http.StatusInternalServerError},
+	}
+	path := "/hotels/12/available-room-types?check_in=2030-01-10&check_out=2030-01-13&rooms_count=1&guest_count=2"
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			service := &fakeBookingCreator{availabilityErr: tt.err}
+			mux, _ := newAuthenticatedBookingMux(t, service, 42)
+			recorder := performBookingGET(mux, "", path)
+
+			if recorder.Code != tt.wantStatus {
+				t.Fatalf("status = %d, want %d; body = %s", recorder.Code, tt.wantStatus, recorder.Body.String())
+			}
+			if !service.availabilityCalled {
+				t.Fatal("availability service was not called")
+			}
+		})
+	}
+}
+
+func TestBookingHandlerListAvailableRoomTypesReturnsEmptyArray(t *testing.T) {
+	service := &fakeBookingCreator{availabilityResult: []sqlc.ListAvailableRoomTypesRow{}}
+	mux, _ := newAuthenticatedBookingMux(t, service, 42)
+	recorder := performBookingGET(
+		mux,
+		"",
+		"/hotels/12/available-room-types?check_in=2030-01-10&check_out=2030-01-13&rooms_count=1&guest_count=2",
+	)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusOK)
+	}
+	if got := strings.TrimSpace(recorder.Body.String()); got != "[]" {
+		t.Errorf("body = %q, want []", got)
+	}
+}
 func TestBookingHandlerCancelBookingMapsServiceErrors(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -575,6 +711,10 @@ func newAuthenticatedBookingMux(t *testing.T, service bookingService, userID int
 	mux.Handle(
 		"POST /me/bookings/{bookingID}/cancel",
 		authMiddleware.Authenticate(http.HandlerFunc(bookingHandler.CancelBooking)),
+	)
+	mux.HandleFunc(
+		"GET /hotels/{hotelID}/available-room-types",
+		bookingHandler.ListAvailableRoomTypes,
 	)
 
 	return mux, token

@@ -18,6 +18,7 @@ type bookingService interface {
 	ListBookingsByUser(ctx context.Context, userID int64) ([]sqlc.Booking, error)
 	GetBookingByUserID(ctx context.Context, bookingID int64, userID int64) (sqlc.Booking, error)
 	CancelBooking(ctx context.Context, bookingID int64, userID int64) (sqlc.Booking, error)
+	ListAvailableRoomTypes(ctx context.Context, input booking.AvailabilityInput) ([]sqlc.ListAvailableRoomTypesRow, error)
 }
 
 type BookingHandler struct {
@@ -86,6 +87,7 @@ func (h *BookingHandler) CreateBooking(w http.ResponseWriter, r *http.Request) {
 	case errors.Is(err, booking.ErrInvalidDates),
 		errors.Is(err, booking.ErrInvalidRooms),
 		errors.Is(err, booking.ErrInvalidGuests),
+		errors.Is(err, booking.ErrCheckInInPast),
 		errors.Is(err, booking.ErrCapacityExceeded):
 		http.Error(w, err.Error(), http.StatusBadRequest)
 
@@ -190,4 +192,97 @@ func (h *BookingHandler) CancelBooking(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		json.NewEncoder(w).Encode(cancelBooking)
 	}
+}
+func (h *BookingHandler) ListAvailableRoomTypes(w http.ResponseWriter, r *http.Request) {
+	hotelID, err := strconv.ParseInt(
+		r.PathValue("hotelID"),
+		10,
+		64,
+	)
+	if err != nil || hotelID <= 0 {
+		http.Error(w, "invalid hotel ID", http.StatusBadRequest)
+		return
+	}
+	query := r.URL.Query()
+
+	checkIn, err := time.Parse(
+		time.DateOnly,
+		query.Get("check_in"),
+	)
+	if err != nil {
+		http.Error(
+			w,
+			"check_in must use YYYY-MM-DD",
+			http.StatusBadRequest,
+		)
+		return
+	}
+
+	checkOut, err := time.Parse(
+		time.DateOnly,
+		query.Get("check_out"),
+	)
+	if err != nil {
+		http.Error(
+			w,
+			"check_out must use YYYY-MM-DD",
+			http.StatusBadRequest,
+		)
+		return
+	}
+
+	roomsCount, err := strconv.ParseInt(
+		query.Get("rooms_count"),
+		10,
+		32,
+	)
+	if err != nil || roomsCount <= 0 {
+		http.Error(
+			w,
+			"rooms_count must be a positive integer",
+			http.StatusBadRequest,
+		)
+		return
+	}
+
+	guestCount, err := strconv.ParseInt(
+		query.Get("guest_count"),
+		10,
+		32,
+	)
+	if err != nil || guestCount <= 0 {
+		http.Error(
+			w,
+			"guest_count must be a positive integer",
+			http.StatusBadRequest,
+		)
+		return
+	}
+	search, err := h.service.ListAvailableRoomTypes(r.Context(), booking.AvailabilityInput{
+		HotelID:    hotelID,
+		CheckIn:    checkIn,
+		CheckOut:   checkOut,
+		RoomsCount: int32(roomsCount),
+		GuestCount: int32(guestCount),
+	})
+	switch {
+	case errors.Is(err, booking.ErrInvalidHotelID),
+		errors.Is(err, booking.ErrInvalidDates),
+		errors.Is(err, booking.ErrInvalidRooms),
+		errors.Is(err, booking.ErrCheckInInPast),
+		errors.Is(err, booking.ErrInvalidGuests):
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+
+	case err != nil:
+		http.Error(
+			w,
+			"search available room types failed",
+			http.StatusInternalServerError,
+		)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(search)
 }

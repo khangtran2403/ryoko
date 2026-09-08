@@ -161,6 +161,10 @@ func main() {
 		"DELETE /hotels/{hotelID}/images/{imageID}",
 		adminOnly(hotelImageHandler.DeleteHotelImage),
 	)
+	mux.HandleFunc(
+		"GET /hotels/{hotelID}/available-room-types",
+		bookingHandler.ListAvailableRoomTypes,
+	)
 	mux.HandleFunc("POST /auth/register", authHandler.RegisterUser)
 	mux.HandleFunc("POST /auth/login", authHandler.LoginUser)
 

@@ -39,6 +39,7 @@ type Querier interface {
 	IncrementAvailability(ctx context.Context, arg IncrementAvailabilityParams) (int64, error)
 	ListAmenities(ctx context.Context) ([]Amenity, error)
 	ListAmenitiesByHotel(ctx context.Context, hotelID int64) ([]Amenity, error)
+	ListAvailableRoomTypes(ctx context.Context, arg ListAvailableRoomTypesParams) ([]ListAvailableRoomTypesRow, error)
 	ListBookingsByUser(ctx context.Context, userID int64) ([]Booking, error)
 	ListHotelImages(ctx context.Context, hotelID int64) ([]HotelImage, error)
 	ListHotelsByCity(ctx context.Context, city string) ([]Hotel, error)

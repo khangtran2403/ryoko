@@ -310,12 +310,15 @@ func TestCancelBookingRollsBackPartialAvailabilityUpdate(t *testing.T) {
 func TestCancelBookingRejectsStartedStay(t *testing.T) {
 	pool, service := newBookingIntegrationService(t)
 	userID, roomTypeID := insertBookingFixtures(t, pool, 2)
-	today := utcDate(time.Now())
+	currentTime := time.Date(2030, time.January, 1, 12, 0, 0, 0, time.UTC)
+	service.now = func() time.Time {
+		return currentTime
+	}
 	created, err := service.CreateBooking(context.Background(), CreateInput{
 		UserID:     userID,
 		RoomTypeID: roomTypeID,
-		CheckIn:    today.AddDate(0, 0, -1),
-		CheckOut:   today.AddDate(0, 0, 1),
+		CheckIn:    time.Date(2030, time.January, 2, 0, 0, 0, 0, time.UTC),
+		CheckOut:   time.Date(2030, time.January, 4, 0, 0, 0, 0, time.UTC),
 		RoomsCount: 1,
 		GuestCount: 1,
 	})
@@ -323,12 +326,176 @@ func TestCancelBookingRejectsStartedStay(t *testing.T) {
 		t.Fatalf("CreateBooking() error = %v", err)
 	}
 
+	currentTime = time.Date(2030, time.January, 2, 12, 0, 0, 0, time.UTC)
 	_, err = service.CancelBooking(context.Background(), created.ID, userID)
 	if !errors.Is(err, ErrBookingNotCancellable) {
 		t.Fatalf("CancelBooking() error = %v, want ErrBookingNotCancellable", err)
 	}
 	assertBookingStatus(t, pool, created.ID, "confirmed")
 	assertAvailabilityRange(t, pool, roomTypeID, 2, 1, 1)
+}
+
+func TestListAvailableRoomTypesUsesBottleneckNightAndCapacity(t *testing.T) {
+	pool, service := newBookingIntegrationService(t)
+	service.now = func() time.Time {
+		return time.Date(2029, time.January, 1, 12, 0, 0, 0, time.UTC)
+	}
+	_, standardID := insertBookingFixtures(t, pool, 3)
+
+	var hotelID int64
+	if err := pool.QueryRow(
+		context.Background(),
+		"SELECT hotel_id FROM room_types WHERE id = $1",
+		standardID,
+	).Scan(&hotelID); err != nil {
+		t.Fatalf("read hotel ID: %v", err)
+	}
+
+	var suiteID int64
+	if err := pool.QueryRow(
+		context.Background(),
+		`INSERT INTO room_types (
+		     hotel_id, name, price_per_night, capacity, total_rooms
+		 )
+		 VALUES ($1, 'Suite', 200.00, 4, 2)
+		 RETURNING id`,
+		hotelID,
+	).Scan(&suiteID); err != nil {
+		t.Fatalf("insert suite room type: %v", err)
+	}
+	if _, err := pool.Exec(
+		context.Background(),
+		`INSERT INTO room_type_availability (room_type_id, date, rooms_booked)
+		 VALUES
+		     ($1, '2030-01-10', 1),
+		     ($1, '2030-01-11', 2),
+		     ($1, '2030-01-12', 1)`,
+		standardID,
+	); err != nil {
+		t.Fatalf("insert nightly availability: %v", err)
+	}
+
+	available, err := service.ListAvailableRoomTypes(context.Background(), AvailabilityInput{
+		HotelID:    hotelID,
+		CheckIn:    time.Date(2030, time.January, 10, 15, 0, 0, 0, time.UTC),
+		CheckOut:   time.Date(2030, time.January, 13, 9, 0, 0, 0, time.UTC),
+		RoomsCount: 1,
+		GuestCount: 2,
+	})
+	if err != nil {
+		t.Fatalf("ListAvailableRoomTypes() error = %v", err)
+	}
+	if len(available) != 2 {
+		t.Fatalf("available room types = %+v, want 2 rows", available)
+	}
+	if available[0].ID != standardID || available[0].RoomsAvailable != 1 {
+		t.Errorf("standard availability = %+v, want bottleneck availability 1", available[0])
+	}
+	if available[1].ID != suiteID || available[1].RoomsAvailable != 2 {
+		t.Errorf("suite availability = %+v, want availability 2", available[1])
+	}
+
+	capacityFiltered, err := service.ListAvailableRoomTypes(context.Background(), AvailabilityInput{
+		HotelID:    hotelID,
+		CheckIn:    time.Date(2030, time.January, 10, 0, 0, 0, 0, time.UTC),
+		CheckOut:   time.Date(2030, time.January, 13, 0, 0, 0, 0, time.UTC),
+		RoomsCount: 1,
+		GuestCount: 3,
+	})
+	if err != nil {
+		t.Fatalf("capacity-filtered ListAvailableRoomTypes() error = %v", err)
+	}
+	if len(capacityFiltered) != 1 || capacityFiltered[0].ID != suiteID {
+		t.Errorf("capacity-filtered result = %+v, want suite only", capacityFiltered)
+	}
+
+	twoRooms, err := service.ListAvailableRoomTypes(context.Background(), AvailabilityInput{
+		HotelID:    hotelID,
+		CheckIn:    time.Date(2030, time.January, 10, 0, 0, 0, 0, time.UTC),
+		CheckOut:   time.Date(2030, time.January, 13, 0, 0, 0, 0, time.UTC),
+		RoomsCount: 2,
+		GuestCount: 2,
+	})
+	if err != nil {
+		t.Fatalf("two-room ListAvailableRoomTypes() error = %v", err)
+	}
+	if len(twoRooms) != 1 || twoRooms[0].ID != suiteID {
+		t.Errorf("two-room result = %+v, want suite only", twoRooms)
+	}
+}
+
+func TestAvailabilitySearchReflectsBookingAndCancellation(t *testing.T) {
+	pool, service := newBookingIntegrationService(t)
+	userID, roomTypeID := insertBookingFixtures(t, pool, 2)
+	input := futureBookingInput(userID, roomTypeID, 1)
+
+	var hotelID int64
+	if err := pool.QueryRow(
+		context.Background(),
+		"SELECT hotel_id FROM room_types WHERE id = $1",
+		roomTypeID,
+	).Scan(&hotelID); err != nil {
+		t.Fatalf("read hotel ID: %v", err)
+	}
+	search := func(rooms int32) []sqlc.ListAvailableRoomTypesRow {
+		t.Helper()
+		available, err := service.ListAvailableRoomTypes(context.Background(), AvailabilityInput{
+			HotelID:    hotelID,
+			CheckIn:    input.CheckIn,
+			CheckOut:   input.CheckOut,
+			RoomsCount: rooms,
+			GuestCount: 1,
+		})
+		if err != nil {
+			t.Fatalf("ListAvailableRoomTypes(%d) error = %v", rooms, err)
+		}
+		return available
+	}
+
+	before := search(2)
+	if len(before) != 1 || before[0].RoomsAvailable != 2 {
+		t.Fatalf("availability before booking = %+v, want 2 rooms", before)
+	}
+	created, err := service.CreateBooking(context.Background(), input)
+	if err != nil {
+		t.Fatalf("CreateBooking() error = %v", err)
+	}
+	afterBooking := search(1)
+	if len(afterBooking) != 1 || afterBooking[0].RoomsAvailable != 1 {
+		t.Errorf("availability after booking = %+v, want 1 room", afterBooking)
+	}
+	if availableForTwo := search(2); len(availableForTwo) != 0 {
+		t.Errorf("two-room search after booking = %+v, want empty", availableForTwo)
+	}
+
+	if _, err := service.CancelBooking(context.Background(), created.ID, userID); err != nil {
+		t.Fatalf("CancelBooking() error = %v", err)
+	}
+	afterCancellation := search(2)
+	if len(afterCancellation) != 1 || afterCancellation[0].RoomsAvailable != 2 {
+		t.Errorf("availability after cancellation = %+v, want 2 rooms", afterCancellation)
+	}
+}
+
+func TestListAvailableRoomTypesReturnsInitializedEmptySlice(t *testing.T) {
+	_, service := newBookingIntegrationService(t)
+
+	available, err := service.ListAvailableRoomTypes(context.Background(), AvailabilityInput{
+		HotelID:    999999,
+		CheckIn:    time.Date(2030, time.January, 10, 0, 0, 0, 0, time.UTC),
+		CheckOut:   time.Date(2030, time.January, 11, 0, 0, 0, 0, time.UTC),
+		RoomsCount: 1,
+		GuestCount: 1,
+	})
+	if err != nil {
+		t.Fatalf("ListAvailableRoomTypes() error = %v", err)
+	}
+	if available == nil {
+		t.Fatal("ListAvailableRoomTypes() returned nil, want initialized empty slice")
+	}
+	if len(available) != 0 {
+		t.Errorf("ListAvailableRoomTypes() = %+v, want empty", available)
+	}
 }
 
 func newBookingIntegrationService(t *testing.T) (*pgxpool.Pool, *Service) {
