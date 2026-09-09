@@ -165,6 +165,7 @@ func main() {
 		"GET /hotels/{hotelID}/available-room-types",
 		bookingHandler.ListAvailableRoomTypes,
 	)
+	mux.HandleFunc("GET /hotels/search", bookingHandler.SearchAvailableHotels)
 	mux.HandleFunc("POST /auth/register", authHandler.RegisterUser)
 	mux.HandleFunc("POST /auth/login", authHandler.LoginUser)
 

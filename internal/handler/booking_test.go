@@ -36,6 +36,10 @@ type fakeBookingCreator struct {
 	availabilityInput  booking.AvailabilityInput
 	availabilityResult []sqlc.ListAvailableRoomTypesRow
 	availabilityErr    error
+	hotelSearchCalled  bool
+	hotelSearchInput   booking.HotelSearchInput
+	hotelSearchResult  booking.HotelSearchResult
+	hotelSearchErr     error
 }
 
 func (f *fakeBookingCreator) CreateBooking(_ context.Context, input booking.CreateInput) (sqlc.Booking, error) {
@@ -496,6 +500,15 @@ func (f *fakeBookingCreator) ListAvailableRoomTypes(
 	return f.availabilityResult, f.availabilityErr
 }
 
+func (f *fakeBookingCreator) SearchAvailableHotels(
+	_ context.Context,
+	input booking.HotelSearchInput,
+) (booking.HotelSearchResult, error) {
+	f.hotelSearchCalled = true
+	f.hotelSearchInput = input
+	return f.hotelSearchResult, f.hotelSearchErr
+}
+
 func TestBookingHandlerListAvailableRoomTypes(t *testing.T) {
 	service := &fakeBookingCreator{availabilityResult: []sqlc.ListAvailableRoomTypesRow{
 		{ID: 7, HotelID: 12, Name: "Standard", TotalRooms: 5, RoomsAvailable: 2},
@@ -619,6 +632,185 @@ func TestBookingHandlerListAvailableRoomTypesReturnsEmptyArray(t *testing.T) {
 		t.Errorf("body = %q, want []", got)
 	}
 }
+
+func TestBookingHandlerSearchAvailableHotels(t *testing.T) {
+	service := &fakeBookingCreator{
+		hotelSearchResult: booking.HotelSearchResult{
+			Hotels: []sqlc.SearchAvailableHotelsRow{
+				{
+					ID:                     12,
+					Name:                   "Riverside Hotel",
+					City:                   "Da Nang",
+					AvailableRoomTypeCount: 2,
+				},
+			},
+			Pagination: booking.HotelSearchPagination{
+				Page:     2,
+				PageSize: 1,
+				HasMore:  true,
+			},
+		},
+	}
+	mux, _ := newAuthenticatedBookingMux(t, service, 42)
+
+	recorder := performBookingGET(
+		mux,
+		"",
+		"/hotels/search?city=Da+Nang&check_in=2030-01-10&check_out=2030-01-13&rooms_count=2&guest_count=3&page=2&page_size=1&sort=price_desc",
+	)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body = %s", recorder.Code, http.StatusOK, recorder.Body.String())
+	}
+	if !service.hotelSearchCalled {
+		t.Fatal("hotel search service was not called")
+	}
+	if service.hotelSearchInput.City != "Da Nang" ||
+		service.hotelSearchInput.RoomsCount != 2 ||
+		service.hotelSearchInput.GuestCount != 3 ||
+		service.hotelSearchInput.Page != 2 ||
+		service.hotelSearchInput.PageSize != 1 ||
+		service.hotelSearchInput.Sort != booking.HotelSearchSortPriceDesc {
+		t.Errorf("hotel search input = %+v", service.hotelSearchInput)
+	}
+	assertDate(t, service.hotelSearchInput.CheckIn, "2030-01-10")
+	assertDate(t, service.hotelSearchInput.CheckOut, "2030-01-13")
+	if !strings.HasPrefix(recorder.Header().Get("Content-Type"), "application/json") {
+		t.Errorf("Content-Type = %q, want application/json", recorder.Header().Get("Content-Type"))
+	}
+
+	var response booking.HotelSearchResult
+	if err := json.NewDecoder(recorder.Body).Decode(&response); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if len(response.Hotels) != 1 ||
+		response.Hotels[0].ID != 12 ||
+		response.Hotels[0].AvailableRoomTypeCount != 2 {
+		t.Errorf("response = %+v", response)
+	}
+	if response.Pagination.Page != 2 ||
+		response.Pagination.PageSize != 1 ||
+		!response.Pagination.HasMore {
+		t.Errorf("response pagination = %+v", response.Pagination)
+	}
+}
+
+func TestBookingHandlerSearchAvailableHotelsRejectsInvalidQuery(t *testing.T) {
+	tests := []struct {
+		name string
+		path string
+	}{
+		{name: "missing city", path: "/hotels/search?check_in=2030-01-10&check_out=2030-01-13&rooms_count=1&guest_count=2"},
+		{name: "whitespace-only city", path: "/hotels/search?city=+++&check_in=2030-01-10&check_out=2030-01-13&rooms_count=1&guest_count=2"},
+		{name: "missing check-in", path: "/hotels/search?city=Da+Nang&check_out=2030-01-13&rooms_count=1&guest_count=2"},
+		{name: "invalid check-in", path: "/hotels/search?city=Da+Nang&check_in=10-01-2030&check_out=2030-01-13&rooms_count=1&guest_count=2"},
+		{name: "missing check-out", path: "/hotels/search?city=Da+Nang&check_in=2030-01-10&rooms_count=1&guest_count=2"},
+		{name: "invalid check-out", path: "/hotels/search?city=Da+Nang&check_in=2030-01-10&check_out=13-01-2030&rooms_count=1&guest_count=2"},
+		{name: "missing rooms", path: "/hotels/search?city=Da+Nang&check_in=2030-01-10&check_out=2030-01-13&guest_count=2"},
+		{name: "non-numeric rooms", path: "/hotels/search?city=Da+Nang&check_in=2030-01-10&check_out=2030-01-13&rooms_count=many&guest_count=2"},
+		{name: "non-positive rooms", path: "/hotels/search?city=Da+Nang&check_in=2030-01-10&check_out=2030-01-13&rooms_count=0&guest_count=2"},
+		{name: "rooms overflow", path: "/hotels/search?city=Da+Nang&check_in=2030-01-10&check_out=2030-01-13&rooms_count=2147483648&guest_count=2"},
+		{name: "missing guests", path: "/hotels/search?city=Da+Nang&check_in=2030-01-10&check_out=2030-01-13&rooms_count=1"},
+		{name: "non-numeric guests", path: "/hotels/search?city=Da+Nang&check_in=2030-01-10&check_out=2030-01-13&rooms_count=1&guest_count=many"},
+		{name: "non-positive guests", path: "/hotels/search?city=Da+Nang&check_in=2030-01-10&check_out=2030-01-13&rooms_count=1&guest_count=-1"},
+		{name: "guests overflow", path: "/hotels/search?city=Da+Nang&check_in=2030-01-10&check_out=2030-01-13&rooms_count=1&guest_count=2147483648"},
+		{name: "non-numeric page", path: "/hotels/search?city=Da+Nang&check_in=2030-01-10&check_out=2030-01-13&rooms_count=1&guest_count=2&page=first"},
+		{name: "non-positive page", path: "/hotels/search?city=Da+Nang&check_in=2030-01-10&check_out=2030-01-13&rooms_count=1&guest_count=2&page=0"},
+		{name: "page overflow", path: "/hotels/search?city=Da+Nang&check_in=2030-01-10&check_out=2030-01-13&rooms_count=1&guest_count=2&page=2147483648"},
+		{name: "non-numeric page size", path: "/hotels/search?city=Da+Nang&check_in=2030-01-10&check_out=2030-01-13&rooms_count=1&guest_count=2&page_size=many"},
+		{name: "non-positive page size", path: "/hotels/search?city=Da+Nang&check_in=2030-01-10&check_out=2030-01-13&rooms_count=1&guest_count=2&page_size=0"},
+		{name: "page size above maximum", path: "/hotels/search?city=Da+Nang&check_in=2030-01-10&check_out=2030-01-13&rooms_count=1&guest_count=2&page_size=101"},
+		{name: "page size overflow", path: "/hotels/search?city=Da+Nang&check_in=2030-01-10&check_out=2030-01-13&rooms_count=1&guest_count=2&page_size=2147483648"},
+		{name: "invalid sort", path: "/hotels/search?city=Da+Nang&check_in=2030-01-10&check_out=2030-01-13&rooms_count=1&guest_count=2&sort=newest"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			service := &fakeBookingCreator{}
+			mux, _ := newAuthenticatedBookingMux(t, service, 42)
+			recorder := performBookingGET(mux, "", tt.path)
+
+			if recorder.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want %d; body = %s", recorder.Code, http.StatusBadRequest, recorder.Body.String())
+			}
+			if service.hotelSearchCalled {
+				t.Fatal("hotel search service was called for invalid query")
+			}
+		})
+	}
+}
+
+func TestBookingHandlerSearchAvailableHotelsMapsServiceErrors(t *testing.T) {
+	tests := []struct {
+		name       string
+		err        error
+		wantStatus int
+	}{
+		{name: "invalid city", err: booking.ErrInvalidCity, wantStatus: http.StatusBadRequest},
+		{name: "invalid dates", err: booking.ErrInvalidDates, wantStatus: http.StatusBadRequest},
+		{name: "check-in in past", err: booking.ErrCheckInInPast, wantStatus: http.StatusBadRequest},
+		{name: "invalid rooms", err: booking.ErrInvalidRooms, wantStatus: http.StatusBadRequest},
+		{name: "invalid guests", err: booking.ErrInvalidGuests, wantStatus: http.StatusBadRequest},
+		{name: "invalid page", err: booking.ErrInvalidPage, wantStatus: http.StatusBadRequest},
+		{name: "invalid page size", err: booking.ErrInvalidPageSize, wantStatus: http.StatusBadRequest},
+		{name: "invalid sort", err: booking.ErrInvalidSort, wantStatus: http.StatusBadRequest},
+		{name: "unexpected", err: errors.New("database unavailable"), wantStatus: http.StatusInternalServerError},
+	}
+	path := "/hotels/search?city=Da+Nang&check_in=2030-01-10&check_out=2030-01-13&rooms_count=1&guest_count=2"
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			service := &fakeBookingCreator{hotelSearchErr: tt.err}
+			mux, _ := newAuthenticatedBookingMux(t, service, 42)
+			recorder := performBookingGET(mux, "", path)
+
+			if recorder.Code != tt.wantStatus {
+				t.Fatalf("status = %d, want %d; body = %s", recorder.Code, tt.wantStatus, recorder.Body.String())
+			}
+			if !service.hotelSearchCalled {
+				t.Fatal("hotel search service was not called")
+			}
+		})
+	}
+}
+
+func TestBookingHandlerSearchAvailableHotelsReturnsEmptyArray(t *testing.T) {
+	service := &fakeBookingCreator{
+		hotelSearchResult: booking.HotelSearchResult{
+			Hotels: []sqlc.SearchAvailableHotelsRow{},
+			Pagination: booking.HotelSearchPagination{
+				Page:     booking.DefaultHotelSearchPage,
+				PageSize: booking.DefaultHotelSearchPageSize,
+			},
+		},
+	}
+	mux, _ := newAuthenticatedBookingMux(t, service, 42)
+	recorder := performBookingGET(
+		mux,
+		"",
+		"/hotels/search?city=Da+Nang&check_in=2030-01-10&check_out=2030-01-13&rooms_count=1&guest_count=2",
+	)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusOK)
+	}
+	if service.hotelSearchInput.Page != booking.DefaultHotelSearchPage ||
+		service.hotelSearchInput.PageSize != booking.DefaultHotelSearchPageSize ||
+		service.hotelSearchInput.Sort != booking.HotelSearchSortPriceAsc {
+		t.Errorf("default hotel search input = %+v", service.hotelSearchInput)
+	}
+
+	var response booking.HotelSearchResult
+	if err := json.NewDecoder(recorder.Body).Decode(&response); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if response.Hotels == nil || len(response.Hotels) != 0 {
+		t.Errorf("hotels = %+v, want initialized empty array", response.Hotels)
+	}
+	if response.Pagination.HasMore {
+		t.Error("pagination has_more = true, want false")
+	}
+}
 func TestBookingHandlerCancelBookingMapsServiceErrors(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -715,6 +907,10 @@ func newAuthenticatedBookingMux(t *testing.T, service bookingService, userID int
 	mux.HandleFunc(
 		"GET /hotels/{hotelID}/available-room-types",
 		bookingHandler.ListAvailableRoomTypes,
+	)
+	mux.HandleFunc(
+		"GET /hotels/search",
+		bookingHandler.SearchAvailableHotels,
 	)
 
 	return mux, token

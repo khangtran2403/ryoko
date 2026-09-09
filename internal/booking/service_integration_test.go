@@ -498,6 +498,94 @@ func TestListAvailableRoomTypesReturnsInitializedEmptySlice(t *testing.T) {
 	}
 }
 
+func TestSearchAvailableHotelsPaginatesAndSorts(t *testing.T) {
+	pool, service := newBookingIntegrationService(t)
+	service.now = func() time.Time {
+		return time.Date(2029, time.January, 1, 12, 0, 0, 0, time.UTC)
+	}
+
+	insertHotel := func(name, city, price string) int64 {
+		t.Helper()
+
+		var hotelID int64
+		if err := pool.QueryRow(
+			context.Background(),
+			`INSERT INTO hotels (name, address, city)
+			 VALUES ($1, $2, $3)
+			 RETURNING id`,
+			name,
+			name+" address",
+			city,
+		).Scan(&hotelID); err != nil {
+			t.Fatalf("insert hotel %q: %v", name, err)
+		}
+		if _, err := pool.Exec(
+			context.Background(),
+			`INSERT INTO room_types (
+			     hotel_id, name, price_per_night, capacity, total_rooms
+			 )
+			 VALUES ($1, 'Standard', $2, 2, 5)`,
+			hotelID,
+			price,
+		); err != nil {
+			t.Fatalf("insert room type for %q: %v", name, err)
+		}
+		return hotelID
+	}
+
+	cheapestID := insertHotel("Budget Stay", "Da Nang", "100.00")
+	mostExpensiveID := insertHotel("Luxury Stay", "DA NANG", "300.00")
+	middleID := insertHotel("Comfort Stay", "da nang", "200.00")
+	insertHotel("Other City Stay", "Hue", "50.00")
+
+	search := func(page, pageSize int32, sortOrder string) HotelSearchResult {
+		t.Helper()
+
+		result, err := service.SearchAvailableHotels(
+			context.Background(),
+			HotelSearchInput{
+				City:       "  Da Nang  ",
+				CheckIn:    time.Date(2030, time.January, 10, 0, 0, 0, 0, time.UTC),
+				CheckOut:   time.Date(2030, time.January, 13, 0, 0, 0, 0, time.UTC),
+				RoomsCount: 1,
+				GuestCount: 2,
+				Page:       page,
+				PageSize:   pageSize,
+				Sort:       sortOrder,
+			},
+		)
+		if err != nil {
+			t.Fatalf("SearchAvailableHotels() error = %v", err)
+		}
+		return result
+	}
+
+	firstPage := search(1, 2, HotelSearchSortPriceAsc)
+	if len(firstPage.Hotels) != 2 ||
+		firstPage.Hotels[0].ID != cheapestID ||
+		firstPage.Hotels[1].ID != middleID {
+		t.Errorf("ascending first page = %+v, want hotel IDs [%d, %d]", firstPage.Hotels, cheapestID, middleID)
+	}
+	if !firstPage.Pagination.HasMore {
+		t.Error("ascending first page has_more = false, want true")
+	}
+
+	secondPage := search(2, 2, HotelSearchSortPriceAsc)
+	if len(secondPage.Hotels) != 1 || secondPage.Hotels[0].ID != mostExpensiveID {
+		t.Errorf("ascending second page = %+v, want hotel ID [%d]", secondPage.Hotels, mostExpensiveID)
+	}
+	if secondPage.Pagination.HasMore {
+		t.Error("ascending second page has_more = true, want false")
+	}
+
+	descending := search(1, 2, HotelSearchSortPriceDesc)
+	if len(descending.Hotels) != 2 ||
+		descending.Hotels[0].ID != mostExpensiveID ||
+		descending.Hotels[1].ID != middleID {
+		t.Errorf("descending first page = %+v, want hotel IDs [%d, %d]", descending.Hotels, mostExpensiveID, middleID)
+	}
+}
+
 func newBookingIntegrationService(t *testing.T) (*pgxpool.Pool, *Service) {
 	t.Helper()
 

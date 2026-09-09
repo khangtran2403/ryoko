@@ -182,6 +182,119 @@ func TestListAvailableRoomTypesValidatesInputBeforeQuery(t *testing.T) {
 	}
 }
 
+func TestSearchAvailableHotelsValidatesInputBeforeQuery(t *testing.T) {
+	valid := HotelSearchInput{
+		City:       "Da Nang",
+		CheckIn:    time.Date(2030, time.January, 10, 14, 0, 0, 0, time.UTC),
+		CheckOut:   time.Date(2030, time.January, 13, 9, 0, 0, 0, time.UTC),
+		RoomsCount: 1,
+		GuestCount: 2,
+		Page:       DefaultHotelSearchPage,
+		PageSize:   DefaultHotelSearchPageSize,
+		Sort:       HotelSearchSortPriceAsc,
+	}
+	tests := []struct {
+		name    string
+		mutate  func(*HotelSearchInput)
+		wantErr error
+	}{
+		{
+			name: "empty city",
+			mutate: func(input *HotelSearchInput) {
+				input.City = ""
+			},
+			wantErr: ErrInvalidCity,
+		},
+		{
+			name: "whitespace-only city",
+			mutate: func(input *HotelSearchInput) {
+				input.City = "   "
+			},
+			wantErr: ErrInvalidCity,
+		},
+		{
+			name: "check-in is in the past",
+			mutate: func(input *HotelSearchInput) {
+				input.CheckIn = time.Date(2028, time.December, 31, 0, 0, 0, 0, time.UTC)
+			},
+			wantErr: ErrCheckInInPast,
+		},
+		{
+			name: "checkout equals checkin date",
+			mutate: func(input *HotelSearchInput) {
+				input.CheckOut = input.CheckIn.Add(2 * time.Hour)
+			},
+			wantErr: ErrInvalidDates,
+		},
+		{
+			name: "checkout precedes checkin",
+			mutate: func(input *HotelSearchInput) {
+				input.CheckOut = input.CheckIn.AddDate(0, 0, -1)
+			},
+			wantErr: ErrInvalidDates,
+		},
+		{
+			name: "invalid room count",
+			mutate: func(input *HotelSearchInput) {
+				input.RoomsCount = 0
+			},
+			wantErr: ErrInvalidRooms,
+		},
+		{
+			name: "invalid guest count",
+			mutate: func(input *HotelSearchInput) {
+				input.GuestCount = -1
+			},
+			wantErr: ErrInvalidGuests,
+		},
+		{
+			name: "invalid page",
+			mutate: func(input *HotelSearchInput) {
+				input.Page = 0
+			},
+			wantErr: ErrInvalidPage,
+		},
+		{
+			name: "invalid page size",
+			mutate: func(input *HotelSearchInput) {
+				input.PageSize = 0
+			},
+			wantErr: ErrInvalidPageSize,
+		},
+		{
+			name: "page size above maximum",
+			mutate: func(input *HotelSearchInput) {
+				input.PageSize = MaxHotelSearchPageSize + 1
+			},
+			wantErr: ErrInvalidPageSize,
+		},
+		{
+			name: "invalid sort",
+			mutate: func(input *HotelSearchInput) {
+				input.Sort = "newest"
+			},
+			wantErr: ErrInvalidSort,
+		},
+	}
+
+	service := &Service{
+		now: func() time.Time {
+			return time.Date(2029, time.January, 1, 12, 0, 0, 0, time.UTC)
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			input := valid
+			tt.mutate(&input)
+
+			_, err := service.SearchAvailableHotels(context.Background(), input)
+			if !errors.Is(err, tt.wantErr) {
+				t.Fatalf("SearchAvailableHotels() error = %v, want %v", err, tt.wantErr)
+			}
+		})
+	}
+}
+
 func TestDateOnlyUTCPreservesCalendarDate(t *testing.T) {
 	vietnamTime := time.Date(
 		2030,

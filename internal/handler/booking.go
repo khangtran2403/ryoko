@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/khangtran2403/ryoko/internal/booking"
@@ -19,6 +20,7 @@ type bookingService interface {
 	GetBookingByUserID(ctx context.Context, bookingID int64, userID int64) (sqlc.Booking, error)
 	CancelBooking(ctx context.Context, bookingID int64, userID int64) (sqlc.Booking, error)
 	ListAvailableRoomTypes(ctx context.Context, input booking.AvailabilityInput) ([]sqlc.ListAvailableRoomTypesRow, error)
+	SearchAvailableHotels(ctx context.Context, input booking.HotelSearchInput) (booking.HotelSearchResult, error)
 }
 
 type BookingHandler struct {
@@ -278,6 +280,114 @@ func (h *BookingHandler) ListAvailableRoomTypes(w http.ResponseWriter, r *http.R
 		http.Error(
 			w,
 			"search available room types failed",
+			http.StatusInternalServerError,
+		)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(search)
+}
+func (h *BookingHandler) SearchAvailableHotels(w http.ResponseWriter, r *http.Request) {
+	query := r.URL.Query()
+	city := strings.TrimSpace(query.Get("city"))
+	if city == "" {
+		http.Error(w, "city must not be empty", http.StatusBadRequest)
+		return
+	}
+	checkIn, err := time.Parse(time.DateOnly, query.Get("check_in"))
+	if err != nil {
+		http.Error(
+			w,
+			"check_in must use YYYY-MM-DD",
+			http.StatusBadRequest,
+		)
+		return
+	}
+
+	checkOut, err := time.Parse(time.DateOnly, query.Get("check_out"))
+	if err != nil {
+		http.Error(
+			w,
+			"check_out must use YYYY-MM-DD",
+			http.StatusBadRequest,
+		)
+		return
+	}
+
+	roomsCount, err := strconv.ParseInt(query.Get("rooms_count"), 10, 32)
+	if err != nil || roomsCount <= 0 {
+		http.Error(
+			w,
+			"rooms_count must be a positive integer",
+			http.StatusBadRequest,
+		)
+		return
+	}
+
+	guestCount, err := strconv.ParseInt(query.Get("guest_count"), 10, 32)
+	if err != nil || guestCount <= 0 {
+		http.Error(
+			w,
+			"guest_count must be a positive integer",
+			http.StatusBadRequest,
+		)
+		return
+	}
+
+	page := int64(booking.DefaultHotelSearchPage)
+	if rawPage := query.Get("page"); rawPage != "" {
+		page, err = strconv.ParseInt(rawPage, 10, 32)
+		if err != nil || page <= 0 {
+			http.Error(w, "page must be a positive integer", http.StatusBadRequest)
+			return
+		}
+	}
+
+	pageSize := int64(booking.DefaultHotelSearchPageSize)
+	if rawPageSize := query.Get("page_size"); rawPageSize != "" {
+		pageSize, err = strconv.ParseInt(rawPageSize, 10, 32)
+		if err != nil || pageSize <= 0 || pageSize > int64(booking.MaxHotelSearchPageSize) {
+			http.Error(w, "page_size must be between 1 and 100", http.StatusBadRequest)
+			return
+		}
+	}
+
+	sort := query.Get("sort")
+	if sort == "" {
+		sort = booking.HotelSearchSortPriceAsc
+	}
+	if sort != booking.HotelSearchSortPriceAsc && sort != booking.HotelSearchSortPriceDesc {
+		http.Error(w, "sort must be price_asc or price_desc", http.StatusBadRequest)
+		return
+	}
+
+	search, err := h.service.SearchAvailableHotels(r.Context(), booking.HotelSearchInput{
+		City:       city,
+		CheckIn:    checkIn,
+		CheckOut:   checkOut,
+		RoomsCount: int32(roomsCount),
+		GuestCount: int32(guestCount),
+		Page:       int32(page),
+		PageSize:   int32(pageSize),
+		Sort:       sort,
+	})
+	switch {
+	case errors.Is(err, booking.ErrInvalidCity),
+		errors.Is(err, booking.ErrInvalidDates),
+		errors.Is(err, booking.ErrInvalidRooms),
+		errors.Is(err, booking.ErrCheckInInPast),
+		errors.Is(err, booking.ErrInvalidGuests),
+		errors.Is(err, booking.ErrInvalidPage),
+		errors.Is(err, booking.ErrInvalidPageSize),
+		errors.Is(err, booking.ErrInvalidSort):
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+
+	case err != nil:
+		http.Error(
+			w,
+			"search available hotels failed",
 			http.StatusInternalServerError,
 		)
 		return

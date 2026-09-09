@@ -1,0 +1,1 @@
+DROP INDEX IF EXISTS idx_hotels_city_lower;

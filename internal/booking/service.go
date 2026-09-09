@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -24,6 +25,18 @@ var (
 	ErrBookingNotCancellable = errors.New("booking cannot be cancelled")
 	ErrInvalidHotelID        = errors.New("hotel ID must be positive")
 	ErrCheckInInPast         = errors.New("check-in date cannot be in the past")
+	ErrInvalidCity           = errors.New("city must not be empty")
+	ErrInvalidPage           = errors.New("page must be a positive integer")
+	ErrInvalidPageSize       = errors.New("page_size must be between 1 and 100")
+	ErrInvalidSort           = errors.New("sort must be price_asc or price_desc")
+)
+
+const (
+	DefaultHotelSearchPage     int32  = 1
+	DefaultHotelSearchPageSize int32  = 20
+	MaxHotelSearchPageSize     int32  = 100
+	HotelSearchSortPriceAsc    string = "price_asc"
+	HotelSearchSortPriceDesc   string = "price_desc"
 )
 
 type CreateInput struct {
@@ -40,6 +53,27 @@ type AvailabilityInput struct {
 	CheckOut   time.Time
 	RoomsCount int32
 	GuestCount int32
+}
+type HotelSearchInput struct {
+	City       string
+	CheckIn    time.Time
+	CheckOut   time.Time
+	RoomsCount int32
+	GuestCount int32
+	Page       int32
+	PageSize   int32
+	Sort       string
+}
+
+type HotelSearchPagination struct {
+	Page     int32 `json:"page"`
+	PageSize int32 `json:"page_size"`
+	HasMore  bool  `json:"has_more"`
+}
+
+type HotelSearchResult struct {
+	Hotels     []sqlc.SearchAvailableHotelsRow `json:"hotels"`
+	Pagination HotelSearchPagination           `json:"pagination"`
 }
 type Service struct {
 	pool    *pgxpool.Pool
@@ -353,6 +387,63 @@ func (s *Service) ListAvailableRoomTypes(ctx context.Context, input Availability
 		search = []sqlc.ListAvailableRoomTypesRow{}
 	}
 	return search, nil
+}
+func (s *Service) SearchAvailableHotels(ctx context.Context, input HotelSearchInput) (HotelSearchResult, error) {
+	city := strings.TrimSpace(input.City)
+	if city == "" {
+		return HotelSearchResult{}, ErrInvalidCity
+	}
+	checkInDate, checkOutDate, err := s.validateStayDates(input.CheckIn, input.CheckOut)
+	if err != nil {
+		return HotelSearchResult{}, err
+	}
+	if input.RoomsCount <= 0 {
+		return HotelSearchResult{}, ErrInvalidRooms
+	}
+	if input.GuestCount <= 0 {
+		return HotelSearchResult{}, ErrInvalidGuests
+	}
+	if input.Page <= 0 {
+		return HotelSearchResult{}, ErrInvalidPage
+	}
+	if input.PageSize <= 0 || input.PageSize > MaxHotelSearchPageSize {
+		return HotelSearchResult{}, ErrInvalidPageSize
+	}
+	if input.Sort != HotelSearchSortPriceAsc && input.Sort != HotelSearchSortPriceDesc {
+		return HotelSearchResult{}, ErrInvalidSort
+	}
+
+	resultOffset := int64(input.Page-1) * int64(input.PageSize)
+	search, err := s.queries.SearchAvailableHotels(ctx, sqlc.SearchAvailableHotelsParams{
+		City:         city,
+		CheckIn:      pgtype.Date{Time: checkInDate, Valid: true},
+		CheckOut:     pgtype.Date{Time: checkOutDate, Valid: true},
+		RoomsCount:   input.RoomsCount,
+		GuestCount:   input.GuestCount,
+		Sort:         input.Sort,
+		ResultLimit:  int64(input.PageSize) + 1,
+		ResultOffset: resultOffset,
+	})
+	if err != nil {
+		return HotelSearchResult{}, fmt.Errorf("search available hotels: %w", err)
+	}
+
+	hasMore := len(search) > int(input.PageSize)
+	if hasMore {
+		search = search[:input.PageSize]
+	}
+	if search == nil {
+		search = []sqlc.SearchAvailableHotelsRow{}
+	}
+
+	return HotelSearchResult{
+		Hotels: search,
+		Pagination: HotelSearchPagination{
+			Page:     input.Page,
+			PageSize: input.PageSize,
+			HasMore:  hasMore,
+		},
+	}, nil
 }
 func dateOnlyUTC(value time.Time) time.Time {
 	return time.Date(
