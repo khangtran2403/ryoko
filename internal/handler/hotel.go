@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -10,10 +11,15 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/khangtran2403/ryoko/internal/db/sqlc"
+	"github.com/khangtran2403/ryoko/internal/hotel"
 )
 
+type hotelService interface {
+	GetHotelDetailsByID(ctx context.Context, hotelID int64) (hotel.HotelResponse, error)
+}
 type HotelHandler struct {
 	queries *sqlc.Queries
+	service hotelService
 }
 
 type CreateHotelRequest struct {
@@ -23,9 +29,10 @@ type CreateHotelRequest struct {
 	Description string
 }
 
-func NewHotelHandler(queries *sqlc.Queries) *HotelHandler {
+func NewHotelHandler(queries *sqlc.Queries, service hotelService) *HotelHandler {
 	return &HotelHandler{
 		queries: queries,
+		service: service,
 	}
 }
 func (req CreateHotelRequest) Validate() []string {
@@ -82,19 +89,23 @@ func (h *HotelHandler) GetByID(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	getHotel, err := h.queries.GetHotelByID(r.Context(), convId)
-	if errors.Is(err, pgx.ErrNoRows) {
+	getHotel, err := h.service.GetHotelDetailsByID(r.Context(), convId)
+	switch {
+	case errors.Is(err, hotel.ErrHotelNotFound):
 		http.Error(w, "Hotel not found", http.StatusNotFound)
 		return
-	}
-	if err != nil {
+	case errors.Is(err, hotel.ErrInvalidHotelID):
+		http.Error(w, "Invalid hotel ID", http.StatusBadRequest)
+		return
+	case err != nil:
 		http.Error(w, "failed to fetch hotel", http.StatusInternalServerError)
 		return
-	}
 
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(getHotel)
+	default:
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		json.NewEncoder(w).Encode(getHotel)
+	}
 }
 func (h *HotelHandler) ListHotelsByCity(w http.ResponseWriter, r *http.Request) {
 	c := r.URL.Query().Get("city")
