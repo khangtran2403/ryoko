@@ -295,6 +295,75 @@ func TestSearchAvailableHotelsValidatesInputBeforeQuery(t *testing.T) {
 	}
 }
 
+func TestListBookingsByUserValidatesInputBeforeQuery(t *testing.T) {
+	valid := ListBookingsInput{
+		UserID:   42,
+		Page:     DefaultBookingPage,
+		PageSize: DefaultBookingPageSize,
+	}
+	tests := []struct {
+		name    string
+		mutate  func(*ListBookingsInput)
+		wantErr error
+	}{
+		{
+			name: "invalid user",
+			mutate: func(input *ListBookingsInput) {
+				input.UserID = 0
+			},
+			wantErr: ErrInvalidUser,
+		},
+		{
+			name: "zero page",
+			mutate: func(input *ListBookingsInput) {
+				input.Page = 0
+			},
+			wantErr: ErrInvalidPage,
+		},
+		{
+			name: "negative page",
+			mutate: func(input *ListBookingsInput) {
+				input.Page = -1
+			},
+			wantErr: ErrInvalidPage,
+		},
+		{
+			name: "zero page size",
+			mutate: func(input *ListBookingsInput) {
+				input.PageSize = 0
+			},
+			wantErr: ErrInvalidPageSize,
+		},
+		{
+			name: "negative page size",
+			mutate: func(input *ListBookingsInput) {
+				input.PageSize = -1
+			},
+			wantErr: ErrInvalidPageSize,
+		},
+		{
+			name: "page size above maximum",
+			mutate: func(input *ListBookingsInput) {
+				input.PageSize = MaxBookingPageSize + 1
+			},
+			wantErr: ErrInvalidPageSize,
+		},
+	}
+
+	service := &Service{}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			input := valid
+			tt.mutate(&input)
+
+			_, err := service.ListBookingsByUser(context.Background(), input)
+			if !errors.Is(err, tt.wantErr) {
+				t.Fatalf("ListBookingsByUser() error = %v, want %v", err, tt.wantErr)
+			}
+		})
+	}
+}
+
 func TestDateOnlyUTCPreservesCalendarDate(t *testing.T) {
 	vietnamTime := time.Date(
 		2030,

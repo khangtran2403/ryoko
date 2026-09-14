@@ -27,7 +27,8 @@ type fakeBookingCreator struct {
 	getBooking         sqlc.Booking
 	getErr             error
 	listCalled         bool
-	listBookings       []sqlc.Booking
+	listInput          booking.ListBookingsInput
+	listResult         booking.ListBookingsResult
 	listErr            error
 	cancelCalled       bool
 	cancelBooking      sqlc.Booking
@@ -61,11 +62,11 @@ func (f *fakeBookingCreator) GetBookingByUserID(
 
 func (f *fakeBookingCreator) ListBookingsByUser(
 	_ context.Context,
-	userID int64,
-) ([]sqlc.Booking, error) {
+	input booking.ListBookingsInput,
+) (booking.ListBookingsResult, error) {
 	f.listCalled = true
-	f.userID = userID
-	return f.listBookings, f.listErr
+	f.listInput = input
+	return f.listResult, f.listErr
 }
 
 func (f *fakeBookingCreator) CancelBooking(
@@ -347,14 +348,21 @@ func TestBookingHandlerGetBookingByUserIDMapsServiceErrors(t *testing.T) {
 
 func TestBookingHandlerListBookingsByUser(t *testing.T) {
 	service := &fakeBookingCreator{
-		listBookings: []sqlc.Booking{
-			{ID: 91, UserID: 42, RoomTypeID: 7, Status: "confirmed"},
-			{ID: 90, UserID: 42, RoomTypeID: 8, Status: "completed"},
+		listResult: booking.ListBookingsResult{
+			Bookings: []sqlc.Booking{
+				{ID: 91, UserID: 42, RoomTypeID: 7, Status: "confirmed"},
+				{ID: 90, UserID: 42, RoomTypeID: 8, Status: "completed"},
+			},
+			Pagination: booking.BookingPagination{
+				Page:     2,
+				PageSize: 2,
+				HasMore:  true,
+			},
 		},
 	}
 	mux, token := newAuthenticatedBookingMux(t, service, 42)
 
-	recorder := performBookingGET(mux, token, "/me/bookings")
+	recorder := performBookingGET(mux, token, "/me/bookings?page=2&page_size=2")
 
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d; body = %s", recorder.Code, http.StatusOK, recorder.Body.String())
@@ -365,24 +373,37 @@ func TestBookingHandlerListBookingsByUser(t *testing.T) {
 	if !service.listCalled {
 		t.Fatal("booking service was not called")
 	}
-	if service.userID != 42 {
-		t.Errorf("user ID = %d, want authenticated user ID 42", service.userID)
+	if service.listInput.UserID != 42 ||
+		service.listInput.Page != 2 ||
+		service.listInput.PageSize != 2 {
+		t.Errorf("list input = %+v, want user=42 page=2 page_size=2", service.listInput)
 	}
 
-	var response []sqlc.Booking
+	var response booking.ListBookingsResult
 	if err := json.NewDecoder(recorder.Body).Decode(&response); err != nil {
 		t.Fatalf("decode response: %v", err)
 	}
-	if len(response) != 2 {
-		t.Fatalf("response length = %d, want 2", len(response))
+	if len(response.Bookings) != 2 {
+		t.Fatalf("response length = %d, want 2", len(response.Bookings))
 	}
-	if response[0].ID != 91 || response[1].ID != 90 {
-		t.Errorf("response booking IDs = [%d, %d], want [91, 90]", response[0].ID, response[1].ID)
+	if response.Bookings[0].ID != 91 || response.Bookings[1].ID != 90 {
+		t.Errorf("response booking IDs = [%d, %d], want [91, 90]", response.Bookings[0].ID, response.Bookings[1].ID)
+	}
+	if response.Pagination.Page != 2 ||
+		response.Pagination.PageSize != 2 ||
+		!response.Pagination.HasMore {
+		t.Errorf("pagination = %+v", response.Pagination)
 	}
 }
 
 func TestBookingHandlerListBookingsByUserReturnsEmptyArray(t *testing.T) {
-	service := &fakeBookingCreator{listBookings: []sqlc.Booking{}}
+	service := &fakeBookingCreator{listResult: booking.ListBookingsResult{
+		Bookings: []sqlc.Booking{},
+		Pagination: booking.BookingPagination{
+			Page:     booking.DefaultBookingPage,
+			PageSize: booking.DefaultBookingPageSize,
+		},
+	}}
 	mux, token := newAuthenticatedBookingMux(t, service, 42)
 
 	recorder := performBookingGET(mux, token, "/me/bookings")
@@ -390,22 +411,74 @@ func TestBookingHandlerListBookingsByUserReturnsEmptyArray(t *testing.T) {
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d; body = %s", recorder.Code, http.StatusOK, recorder.Body.String())
 	}
-	if got := strings.TrimSpace(recorder.Body.String()); got != "[]" {
-		t.Errorf("body = %q, want []", got)
+	if service.listInput.Page != booking.DefaultBookingPage ||
+		service.listInput.PageSize != booking.DefaultBookingPageSize {
+		t.Errorf("default pagination input = %+v", service.listInput)
+	}
+	var response booking.ListBookingsResult
+	if err := json.NewDecoder(recorder.Body).Decode(&response); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if response.Bookings == nil || len(response.Bookings) != 0 {
+		t.Errorf("bookings = %+v, want initialized empty array", response.Bookings)
 	}
 }
 
 func TestBookingHandlerListBookingsByUserHandlesServiceError(t *testing.T) {
-	service := &fakeBookingCreator{listErr: errors.New("database unavailable")}
-	mux, token := newAuthenticatedBookingMux(t, service, 42)
-
-	recorder := performBookingGET(mux, token, "/me/bookings")
-
-	if recorder.Code != http.StatusInternalServerError {
-		t.Fatalf("status = %d, want %d; body = %s", recorder.Code, http.StatusInternalServerError, recorder.Body.String())
+	tests := []struct {
+		name       string
+		err        error
+		wantStatus int
+	}{
+		{name: "invalid user", err: booking.ErrInvalidUser, wantStatus: http.StatusBadRequest},
+		{name: "invalid page", err: booking.ErrInvalidPage, wantStatus: http.StatusBadRequest},
+		{name: "invalid page size", err: booking.ErrInvalidPageSize, wantStatus: http.StatusBadRequest},
+		{name: "unexpected", err: errors.New("database unavailable"), wantStatus: http.StatusInternalServerError},
 	}
-	if !service.listCalled {
-		t.Fatal("booking service was not called")
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			service := &fakeBookingCreator{listErr: tt.err}
+			mux, token := newAuthenticatedBookingMux(t, service, 42)
+			recorder := performBookingGET(mux, token, "/me/bookings")
+
+			if recorder.Code != tt.wantStatus {
+				t.Fatalf("status = %d, want %d; body = %s", recorder.Code, tt.wantStatus, recorder.Body.String())
+			}
+			if !service.listCalled {
+				t.Fatal("booking service was not called")
+			}
+		})
+	}
+}
+
+func TestBookingHandlerListBookingsByUserRejectsInvalidPagination(t *testing.T) {
+	tests := []struct {
+		name string
+		path string
+	}{
+		{name: "non-numeric page", path: "/me/bookings?page=first"},
+		{name: "non-positive page", path: "/me/bookings?page=0"},
+		{name: "page overflow", path: "/me/bookings?page=2147483648"},
+		{name: "non-numeric page size", path: "/me/bookings?page_size=many"},
+		{name: "non-positive page size", path: "/me/bookings?page_size=0"},
+		{name: "page size above maximum", path: "/me/bookings?page_size=101"},
+		{name: "page size overflow", path: "/me/bookings?page_size=2147483648"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			service := &fakeBookingCreator{}
+			mux, token := newAuthenticatedBookingMux(t, service, 42)
+			recorder := performBookingGET(mux, token, tt.path)
+
+			if recorder.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want %d; body = %s", recorder.Code, http.StatusBadRequest, recorder.Body.String())
+			}
+			if service.listCalled {
+				t.Fatal("booking service was called for invalid pagination")
+			}
+		})
 	}
 }
 

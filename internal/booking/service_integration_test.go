@@ -498,6 +498,88 @@ func TestListAvailableRoomTypesReturnsInitializedEmptySlice(t *testing.T) {
 	}
 }
 
+func TestListBookingsByUserPaginatesNewestFirst(t *testing.T) {
+	pool, service := newBookingIntegrationService(t)
+	userID, roomTypeID := insertBookingFixtures(t, pool, 3)
+
+	insertBooking := func(createdAt time.Time) int64 {
+		t.Helper()
+
+		var bookingID int64
+		if err := pool.QueryRow(
+			context.Background(),
+			"INSERT INTO bookings "+
+				"(user_id, room_type_id, check_in, check_out, rooms_count, guest_count, "+
+				"price_per_night, total_price, created_at) "+
+				"VALUES ($1, $2, '2030-01-10', '2030-01-11', 1, 1, 100.00, 100.00, $3) "+
+				"RETURNING id",
+			userID,
+			roomTypeID,
+			createdAt,
+		).Scan(&bookingID); err != nil {
+			t.Fatalf("insert booking: %v", err)
+		}
+		return bookingID
+	}
+
+	oldestID := insertBooking(time.Date(2029, time.January, 1, 8, 0, 0, 0, time.UTC))
+	middleID := insertBooking(time.Date(2029, time.January, 2, 8, 0, 0, 0, time.UTC))
+	newestID := insertBooking(time.Date(2029, time.January, 3, 8, 0, 0, 0, time.UTC))
+
+	var otherUserID int64
+	if err := pool.QueryRow(
+		context.Background(),
+		"INSERT INTO users (email, full_name) "+
+			"VALUES ('pagination-other@example.com', 'Pagination Other') RETURNING id",
+	).Scan(&otherUserID); err != nil {
+		t.Fatalf("insert other user: %v", err)
+	}
+	if _, err := pool.Exec(
+		context.Background(),
+		"INSERT INTO bookings "+
+			"(user_id, room_type_id, check_in, check_out, rooms_count, guest_count, "+
+			"price_per_night, total_price, created_at) "+
+			"VALUES ($1, $2, '2030-01-10', '2030-01-11', 1, 1, 100.00, 100.00, $3)",
+		otherUserID,
+		roomTypeID,
+		time.Date(2029, time.January, 4, 8, 0, 0, 0, time.UTC),
+	); err != nil {
+		t.Fatalf("insert other user's booking: %v", err)
+	}
+
+	firstPage, err := service.ListBookingsByUser(context.Background(), ListBookingsInput{
+		UserID:   userID,
+		Page:     1,
+		PageSize: 2,
+	})
+	if err != nil {
+		t.Fatalf("ListBookingsByUser() first page error = %v", err)
+	}
+	if len(firstPage.Bookings) != 2 ||
+		firstPage.Bookings[0].ID != newestID ||
+		firstPage.Bookings[1].ID != middleID {
+		t.Errorf("first page = %+v, want booking IDs [%d, %d]", firstPage.Bookings, newestID, middleID)
+	}
+	if !firstPage.Pagination.HasMore {
+		t.Error("first page has_more = false, want true")
+	}
+
+	secondPage, err := service.ListBookingsByUser(context.Background(), ListBookingsInput{
+		UserID:   userID,
+		Page:     2,
+		PageSize: 2,
+	})
+	if err != nil {
+		t.Fatalf("ListBookingsByUser() second page error = %v", err)
+	}
+	if len(secondPage.Bookings) != 1 || secondPage.Bookings[0].ID != oldestID {
+		t.Errorf("second page = %+v, want booking ID [%d]", secondPage.Bookings, oldestID)
+	}
+	if secondPage.Pagination.HasMore {
+		t.Error("second page has_more = true, want false")
+	}
+}
+
 func TestSearchAvailableHotelsPaginatesAndSorts(t *testing.T) {
 	pool, service := newBookingIntegrationService(t)
 	service.now = func() time.Time {

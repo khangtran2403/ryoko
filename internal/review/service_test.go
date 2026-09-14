@@ -98,13 +98,40 @@ func TestNullableComment(t *testing.T) {
 	})
 }
 
-func TestReviewReadMethodsRejectInvalidIDsBeforeQuery(t *testing.T) {
+func TestGetReviewByIDRejectsInvalidIDBeforeQuery(t *testing.T) {
 	service := &Service{}
 
 	if _, err := service.GetReviewByID(context.Background(), 0); !errors.Is(err, ErrReviewNotFound) {
 		t.Errorf("GetReviewByID() error = %v, want ErrReviewNotFound", err)
 	}
-	if _, err := service.ListReviewByHotel(context.Background(), 0); !errors.Is(err, ErrReviewNotFound) {
-		t.Errorf("ListReviewByHotel() error = %v, want ErrReviewNotFound", err)
+
+}
+
+func TestListReviewByHotelValidatesPaginationBeforeQuery(t *testing.T) {
+	service := &Service{}
+	tests := []struct {
+		name     string
+		page     int32
+		pageSize int32
+		wantErr  error
+	}{
+		{name: "zero page", page: 0, pageSize: DefaultReviewPageSize, wantErr: ErrInvalidPage},
+		{name: "negative page", page: -1, pageSize: DefaultReviewPageSize, wantErr: ErrInvalidPage},
+		{name: "zero page size", page: DefaultReviewPage, pageSize: 0, wantErr: ErrInvalidPageSize},
+		{name: "negative page size", page: DefaultReviewPage, pageSize: -1, wantErr: ErrInvalidPageSize},
+		{name: "page size above maximum", page: DefaultReviewPage, pageSize: MaxReviewPageSize + 1, wantErr: ErrInvalidPageSize},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := service.ListReviewByHotel(context.Background(), ListReviewsByHotelInput{
+				HotelID:  12,
+				Page:     tt.page,
+				PageSize: tt.pageSize,
+			})
+			if !errors.Is(err, tt.wantErr) {
+				t.Errorf("ListReviewByHotel() error = %v, want %v", err, tt.wantErr)
+			}
+		})
 	}
 }

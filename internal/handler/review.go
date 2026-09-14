@@ -15,7 +15,7 @@ import (
 type reviewService interface {
 	CreateReview(ctx context.Context, input review.CreateReview) (sqlc.Review, error)
 	GetReviewByID(ctx context.Context, reviewID int64) (sqlc.GetReviewByIDRow, error)
-	ListReviewByHotel(ctx context.Context, hotelID int64) ([]sqlc.ListReviewsByHotelRow, error)
+	ListReviewByHotel(ctx context.Context, input review.ListReviewsByHotelInput) (review.HotelReviewResult, error)
 	UpdateReviewByUser(ctx context.Context, input review.UpdateReviewInput) (sqlc.Review, error)
 	DeleteReview(ctx context.Context, reviewID int64, userID int64) (int64, error)
 }
@@ -108,6 +108,7 @@ func (h ReviewHandler) GetReviewByID(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(getReview)
 }
 func (h ReviewHandler) ListReviewByHotel(w http.ResponseWriter, r *http.Request) {
+	query := r.URL.Query()
 	getID := r.PathValue("hotelID")
 	if getID == "" {
 		http.Error(w, "hotel ID is required", http.StatusBadRequest)
@@ -118,9 +119,39 @@ func (h ReviewHandler) ListReviewByHotel(w http.ResponseWriter, r *http.Request)
 		http.Error(w, "Invalid request body", http.StatusBadRequest)
 		return
 	}
-	getReview, err := h.service.ListReviewByHotel(r.Context(), convID)
+	if convID <= 0 {
+		http.Error(w, "hotel ID must be positive", http.StatusBadRequest)
+		return
+	}
+	page := int64(review.DefaultReviewPage)
+	if rawPage := query.Get("page"); rawPage != "" {
+		page, err = strconv.ParseInt(rawPage, 10, 32)
+		if err != nil || page <= 0 {
+			http.Error(w, "page must be a positive integer", http.StatusBadRequest)
+			return
+		}
+	}
+
+	pageSize := int64(review.DefaultReviewPageSize)
+	if rawPageSize := query.Get("page_size"); rawPageSize != "" {
+		pageSize, err = strconv.ParseInt(rawPageSize, 10, 32)
+		if err != nil || pageSize <= 0 || pageSize > int64(review.MaxReviewPageSize) {
+			http.Error(w, "page_size must be between 1 and 100", http.StatusBadRequest)
+			return
+		}
+	}
+
+	getReview, err := h.service.ListReviewByHotel(r.Context(), review.ListReviewsByHotelInput{
+		HotelID:  convID,
+		Page:     int32(page),
+		PageSize: int32(pageSize),
+	})
 	if errors.Is(err, review.ErrReviewNotFound) {
 		http.Error(w, "Review not found", http.StatusNotFound)
+		return
+	}
+	if errors.Is(err, review.ErrInvalidPage) || errors.Is(err, review.ErrInvalidPageSize) {
+		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 	if err != nil {

@@ -37,6 +37,9 @@ const (
 	MaxHotelSearchPageSize     int32  = 100
 	HotelSearchSortPriceAsc    string = "price_asc"
 	HotelSearchSortPriceDesc   string = "price_desc"
+	DefaultBookingPage         int32  = 1
+	DefaultBookingPageSize     int32  = 20
+	MaxBookingPageSize         int32  = 100
 )
 
 type CreateInput struct {
@@ -74,6 +77,22 @@ type HotelSearchPagination struct {
 type HotelSearchResult struct {
 	Hotels     []sqlc.SearchAvailableHotelsRow `json:"hotels"`
 	Pagination HotelSearchPagination           `json:"pagination"`
+}
+type ListBookingsInput struct {
+	UserID   int64
+	Page     int32
+	PageSize int32
+}
+
+type BookingPagination struct {
+	Page     int32 `json:"page"`
+	PageSize int32 `json:"page_size"`
+	HasMore  bool  `json:"has_more"`
+}
+
+type ListBookingsResult struct {
+	Bookings   []sqlc.Booking    `json:"bookings"`
+	Pagination BookingPagination `json:"pagination"`
 }
 type Service struct {
 	pool    *pgxpool.Pool
@@ -227,18 +246,43 @@ func (s *Service) GetBookingByUserID(ctx context.Context, bookingID int64, userI
 }
 func (s *Service) ListBookingsByUser(
 	ctx context.Context,
-	userID int64,
-) ([]sqlc.Booking, error) {
-	if userID <= 0 {
-		return nil, ErrInvalidUser
+	input ListBookingsInput,
+) (ListBookingsResult, error) {
+	if input.UserID <= 0 {
+		return ListBookingsResult{}, ErrInvalidUser
 	}
+	if input.Page <= 0 {
+		return ListBookingsResult{}, ErrInvalidPage
+	}
+	if input.PageSize <= 0 || input.PageSize > MaxBookingPageSize {
+		return ListBookingsResult{}, ErrInvalidPageSize
+	}
+	resultOffset := int64(input.Page-1) * int64(input.PageSize)
 
-	bookings, err := s.queries.ListBookingsByUser(ctx, userID)
+	bookings, err := s.queries.ListBookingsByUser(ctx, sqlc.ListBookingsByUserParams{
+		UserID:       input.UserID,
+		ResultLimit:  int64(input.PageSize) + 1,
+		ResultOffset: resultOffset,
+	})
 	if err != nil {
-		return nil, fmt.Errorf("list bookings by user: %w", err)
+		return ListBookingsResult{}, fmt.Errorf("list bookings by user: %w", err)
+	}
+	hasMore := len(bookings) > int(input.PageSize)
+	if hasMore {
+		bookings = bookings[:input.PageSize]
+	}
+	if bookings == nil {
+		bookings = []sqlc.Booking{}
 	}
 
-	return bookings, nil
+	return ListBookingsResult{
+		Bookings: bookings,
+		Pagination: BookingPagination{
+			Page:     input.Page,
+			PageSize: input.PageSize,
+			HasMore:  hasMore,
+		},
+	}, nil
 }
 
 func (s *Service) CancelBooking(ctx context.Context, bookingID int64, userID int64) (sqlc.Booking, error) {

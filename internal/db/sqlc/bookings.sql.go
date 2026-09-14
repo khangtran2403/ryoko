@@ -377,10 +377,18 @@ SELECT
 FROM bookings
 WHERE user_id = $1
 ORDER BY created_at DESC, id DESC
+LIMIT $3::bigint
+OFFSET $2::bigint
 `
 
-func (q *Queries) ListBookingsByUser(ctx context.Context, userID int64) ([]Booking, error) {
-	rows, err := q.db.Query(ctx, listBookingsByUser, userID)
+type ListBookingsByUserParams struct {
+	UserID       int64 `json:"user_id"`
+	ResultOffset int64 `json:"result_offset"`
+	ResultLimit  int64 `json:"result_limit"`
+}
+
+func (q *Queries) ListBookingsByUser(ctx context.Context, arg ListBookingsByUserParams) ([]Booking, error) {
+	rows, err := q.db.Query(ctx, listBookingsByUser, arg.UserID, arg.ResultOffset, arg.ResultLimit)
 	if err != nil {
 		return nil, err
 	}

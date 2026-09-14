@@ -16,7 +16,7 @@ import (
 
 type bookingService interface {
 	CreateBooking(ctx context.Context, input booking.CreateInput) (sqlc.Booking, error)
-	ListBookingsByUser(ctx context.Context, userID int64) ([]sqlc.Booking, error)
+	ListBookingsByUser(ctx context.Context, input booking.ListBookingsInput) (booking.ListBookingsResult, error)
 	GetBookingByUserID(ctx context.Context, bookingID int64, userID int64) (sqlc.Booking, error)
 	CancelBooking(ctx context.Context, bookingID int64, userID int64) (sqlc.Booking, error)
 	ListAvailableRoomTypes(ctx context.Context, input booking.AvailabilityInput) ([]sqlc.ListAvailableRoomTypesRow, error)
@@ -142,19 +142,47 @@ func (h *BookingHandler) GetBookingByUserID(w http.ResponseWriter, r *http.Reque
 	json.NewEncoder(w).Encode(getBooking)
 }
 func (h *BookingHandler) ListBookingsByUser(w http.ResponseWriter, r *http.Request) {
+	query := r.URL.Query()
+	var err error
 	principal, ok := middleware.PrincipalFromContext(r.Context())
 	if !ok {
 		w.Header().Set("WWW-Authenticate", "Bearer")
 		http.Error(w, "Unauthorized", http.StatusUnauthorized)
 		return
 	}
-	listBooking, err := h.service.ListBookingsByUser(r.Context(), principal.UserID)
+	page := int64(booking.DefaultBookingPage)
+	if rawPage := query.Get("page"); rawPage != "" {
+		page, err = strconv.ParseInt(rawPage, 10, 32)
+		if err != nil || page <= 0 {
+			http.Error(w, "page must be a positive integer", http.StatusBadRequest)
+			return
+		}
+	}
+
+	pageSize := int64(booking.DefaultBookingPageSize)
+	if rawPageSize := query.Get("page_size"); rawPageSize != "" {
+		pageSize, err = strconv.ParseInt(rawPageSize, 10, 32)
+		if err != nil || pageSize <= 0 || pageSize > int64(booking.MaxBookingPageSize) {
+			http.Error(w, "page_size must be between 1 and 100", http.StatusBadRequest)
+			return
+		}
+	}
+	listBooking, err := h.service.ListBookingsByUser(r.Context(), booking.ListBookingsInput{
+		UserID:   principal.UserID,
+		Page:     int32(page),
+		PageSize: int32(pageSize),
+	})
+	if errors.Is(err, booking.ErrInvalidUser) {
+		http.Error(w, "invalid user", http.StatusBadRequest)
+		return
+	}
+	if errors.Is(err, booking.ErrInvalidPage) || errors.Is(err, booking.ErrInvalidPageSize) {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
 	if err != nil {
 		http.Error(w, "list booking failed", http.StatusInternalServerError)
 		return
-	}
-	if listBooking == nil {
-		listBooking = []sqlc.Booking{}
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)

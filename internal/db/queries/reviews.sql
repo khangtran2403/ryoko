@@ -58,7 +58,9 @@ JOIN room_types AS rt
     ON rt.id = b.room_type_id
 WHERE rt.hotel_id = sqlc.arg(hotel_id)
   AND r.deleted_at IS NULL
-ORDER BY r.created_at DESC, r.id DESC;
+ORDER BY r.created_at DESC, r.id DESC
+LIMIT sqlc.arg(result_limit)::bigint
+OFFSET sqlc.arg(result_offset)::bigint;
 -- name: UpdateReviewByUser :one
 UPDATE reviews AS r
 SET
@@ -92,3 +94,17 @@ WHERE r.id = sqlc.arg(review_id)
   AND b.user_id = sqlc.arg(user_id)
   AND r.deleted_at IS NULL
 RETURNING r.id;
+-- name: GetHotelReviewSummary :one
+SELECT
+    COALESCE(
+        AVG(r.rating),
+        0
+    )::numeric(3, 2) AS average_rating,
+    COUNT(r.id)::int AS review_count
+FROM reviews AS r
+JOIN bookings AS b
+    ON b.id = r.booking_id
+JOIN room_types AS rt
+    ON rt.id = b.room_type_id
+WHERE rt.hotel_id = sqlc.arg(hotel_id)
+  AND r.deleted_at IS NULL;

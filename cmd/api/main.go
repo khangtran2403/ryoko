@@ -18,6 +18,7 @@ import (
 	"github.com/khangtran2403/ryoko/internal/config"
 	"github.com/khangtran2403/ryoko/internal/db/sqlc"
 	"github.com/khangtran2403/ryoko/internal/handler"
+	"github.com/khangtran2403/ryoko/internal/hotel"
 	hotelimages "github.com/khangtran2403/ryoko/internal/hotel_images"
 	"github.com/khangtran2403/ryoko/internal/middleware"
 	"github.com/khangtran2403/ryoko/internal/review"
@@ -50,8 +51,8 @@ func main() {
 	if err != nil {
 		log.Fatalf("invalid token configuration: %v", err)
 	}
-
-	hotelHandler := handler.NewHotelHandler(queries)
+	hotelService := hotel.NewService(queries)
+	hotelHandler := handler.NewHotelHandler(queries, hotelService)
 	roomTypeHandler := handler.NewRoomTypeHandler(queries)
 	amenityHandler := handler.NewAmenityHandler(queries)
 	userHandler := handler.NewUserHandler(queries)
@@ -64,8 +65,8 @@ func main() {
 		log.Default(),
 	)
 	bookingHandler := handler.NewBookingHandler(bookingService)
-	reviewSevice := review.NewService(queries)
-	reviewHandler := handler.NewReviewHandler(reviewSevice)
+	reviewService := review.NewService(queries)
+	reviewHandler := handler.NewReviewHandler(reviewService)
 	hotelImageService := hotelimages.NewService(pool, queries)
 	hotelImageHandler := handler.NewHotelImageHandler(hotelImageService)
 	adminOnly := func(handler http.HandlerFunc) http.Handler {

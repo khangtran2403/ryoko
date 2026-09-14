@@ -89,6 +89,34 @@ func (q *Queries) DeleteReviewByUser(ctx context.Context, arg DeleteReviewByUser
 	return id, err
 }
 
+const getHotelReviewSummary = `-- name: GetHotelReviewSummary :one
+SELECT
+    COALESCE(
+        AVG(r.rating),
+        0
+    )::numeric(3, 2) AS average_rating,
+    COUNT(r.id)::int AS review_count
+FROM reviews AS r
+JOIN bookings AS b
+    ON b.id = r.booking_id
+JOIN room_types AS rt
+    ON rt.id = b.room_type_id
+WHERE rt.hotel_id = $1
+  AND r.deleted_at IS NULL
+`
+
+type GetHotelReviewSummaryRow struct {
+	AverageRating pgtype.Numeric `json:"average_rating"`
+	ReviewCount   int32          `json:"review_count"`
+}
+
+func (q *Queries) GetHotelReviewSummary(ctx context.Context, hotelID int64) (GetHotelReviewSummaryRow, error) {
+	row := q.db.QueryRow(ctx, getHotelReviewSummary, hotelID)
+	var i GetHotelReviewSummaryRow
+	err := row.Scan(&i.AverageRating, &i.ReviewCount)
+	return i, err
+}
+
 const getReviewByID = `-- name: GetReviewByID :one
 SELECT
     r.id,
@@ -156,7 +184,15 @@ JOIN room_types AS rt
 WHERE rt.hotel_id = $1
   AND r.deleted_at IS NULL
 ORDER BY r.created_at DESC, r.id DESC
+LIMIT $3::bigint
+OFFSET $2::bigint
 `
+
+type ListReviewsByHotelParams struct {
+	HotelID      int64 `json:"hotel_id"`
+	ResultOffset int64 `json:"result_offset"`
+	ResultLimit  int64 `json:"result_limit"`
+}
 
 type ListReviewsByHotelRow struct {
 	ID           int64              `json:"id"`
@@ -168,8 +204,8 @@ type ListReviewsByHotelRow struct {
 	RoomTypeName string             `json:"room_type_name"`
 }
 
-func (q *Queries) ListReviewsByHotel(ctx context.Context, hotelID int64) ([]ListReviewsByHotelRow, error) {
-	rows, err := q.db.Query(ctx, listReviewsByHotel, hotelID)
+func (q *Queries) ListReviewsByHotel(ctx context.Context, arg ListReviewsByHotelParams) ([]ListReviewsByHotelRow, error) {
+	rows, err := q.db.Query(ctx, listReviewsByHotel, arg.HotelID, arg.ResultOffset, arg.ResultLimit)
 	if err != nil {
 		return nil, err
 	}

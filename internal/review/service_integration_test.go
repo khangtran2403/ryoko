@@ -62,11 +62,15 @@ func TestReviewServiceIntegration(t *testing.T) {
 		)
 	}
 
-	listed, err := service.ListReviewByHotel(context.Background(), fixtures.hotelID)
+	listed, err := service.ListReviewByHotel(context.Background(), ListReviewsByHotelInput{
+		HotelID:  fixtures.hotelID,
+		Page:     DefaultReviewPage,
+		PageSize: DefaultReviewPageSize,
+	})
 	if err != nil {
 		t.Fatalf("ListReviewByHotel() error = %v", err)
 	}
-	if len(listed) != 1 || listed[0].ID != created.ID {
+	if len(listed.Reviews) != 1 || listed.Reviews[0].ID != created.ID {
 		t.Errorf("ListReviewByHotel() = %+v, want created review", listed)
 	}
 }
@@ -168,15 +172,19 @@ func TestReviewServiceReadNotFoundAndEmptyList(t *testing.T) {
 		t.Fatalf("GetReviewByID() error = %v, want ErrReviewNotFound", err)
 	}
 
-	list, err := service.ListReviewByHotel(context.Background(), 999999)
+	list, err := service.ListReviewByHotel(context.Background(), ListReviewsByHotelInput{
+		HotelID:  999999,
+		Page:     DefaultReviewPage,
+		PageSize: DefaultReviewPageSize,
+	})
 	if err != nil {
 		t.Fatalf("ListReviewByHotel() error = %v", err)
 	}
-	if list == nil {
+	if list.Reviews == nil {
 		t.Fatal("ListReviewByHotel() returned nil, want initialized empty slice")
 	}
-	if len(list) != 0 {
-		t.Errorf("ListReviewByHotel() length = %d, want 0", len(list))
+	if len(list.Reviews) != 0 {
+		t.Errorf("ListReviewByHotel() length = %d, want 0", len(list.Reviews))
 	}
 }
 
@@ -313,11 +321,15 @@ func TestDeleteReviewHidesPublicReadsAndPreservesStayUniqueness(t *testing.T) {
 	if !errors.Is(err, ErrReviewNotFound) {
 		t.Fatalf("GetReviewByID() after delete error = %v, want ErrReviewNotFound", err)
 	}
-	listed, err := service.ListReviewByHotel(context.Background(), fixtures.hotelID)
+	listed, err := service.ListReviewByHotel(context.Background(), ListReviewsByHotelInput{
+		HotelID:  fixtures.hotelID,
+		Page:     DefaultReviewPage,
+		PageSize: DefaultReviewPageSize,
+	})
 	if err != nil {
 		t.Fatalf("ListReviewByHotel() after delete error = %v", err)
 	}
-	if len(listed) != 0 {
+	if len(listed.Reviews) != 0 {
 		t.Errorf("ListReviewByHotel() after delete = %+v, want empty", listed)
 	}
 
@@ -332,6 +344,43 @@ func TestDeleteReviewHidesPublicReadsAndPreservesStayUniqueness(t *testing.T) {
 	})
 	if !errors.Is(err, ErrReviewAlreadyExists) {
 		t.Fatalf("CreateReview() after delete error = %v, want ErrReviewAlreadyExists", err)
+	}
+}
+
+func TestListReviewByHotelPaginatesWithStableNewestFirstOrder(t *testing.T) {
+	pool, service := newReviewIntegrationService(t)
+	fixtures := insertReviewFixtures(t, pool)
+	firstCreated := createReviewFixture(t, service, fixtures.completedBooking, fixtures.ownerID)
+	secondCreated := createReviewFixture(t, service, fixtures.completedBooking2, fixtures.ownerID)
+
+	firstPage, err := service.ListReviewByHotel(context.Background(), ListReviewsByHotelInput{
+		HotelID:  fixtures.hotelID,
+		Page:     1,
+		PageSize: 1,
+	})
+	if err != nil {
+		t.Fatalf("ListReviewByHotel() first page error = %v", err)
+	}
+	if len(firstPage.Reviews) != 1 || firstPage.Reviews[0].ID != secondCreated.ID {
+		t.Errorf("first page = %+v, want newest review ID %d", firstPage.Reviews, secondCreated.ID)
+	}
+	if !firstPage.Pagination.HasMore {
+		t.Error("first page has_more = false, want true")
+	}
+
+	secondPage, err := service.ListReviewByHotel(context.Background(), ListReviewsByHotelInput{
+		HotelID:  fixtures.hotelID,
+		Page:     2,
+		PageSize: 1,
+	})
+	if err != nil {
+		t.Fatalf("ListReviewByHotel() second page error = %v", err)
+	}
+	if len(secondPage.Reviews) != 1 || secondPage.Reviews[0].ID != firstCreated.ID {
+		t.Errorf("second page = %+v, want review ID %d", secondPage.Reviews, firstCreated.ID)
+	}
+	if secondPage.Pagination.HasMore {
+		t.Error("second page has_more = true, want false")
 	}
 }
 

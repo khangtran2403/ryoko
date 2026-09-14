@@ -27,8 +27,8 @@ type fakeReviewService struct {
 	getResult    sqlc.GetReviewByIDRow
 	getErr       error
 	listCalled   bool
-	listHotelID  int64
-	listResult   []sqlc.ListReviewsByHotelRow
+	listInput    review.ListReviewsByHotelInput
+	listResult   review.HotelReviewResult
 	listErr      error
 	updateCalled bool
 	updateInput  review.UpdateReviewInput
@@ -81,10 +81,10 @@ func (f *fakeReviewService) GetReviewByID(
 
 func (f *fakeReviewService) ListReviewByHotel(
 	_ context.Context,
-	hotelID int64,
-) ([]sqlc.ListReviewsByHotelRow, error) {
+	input review.ListReviewsByHotelInput,
+) (review.HotelReviewResult, error) {
 	f.listCalled = true
-	f.listHotelID = hotelID
+	f.listInput = input
 	return f.listResult, f.listErr
 }
 
@@ -281,32 +281,55 @@ func TestReviewHandlerGetReviewByIDHandlesInvalidIDAndErrors(t *testing.T) {
 
 func TestReviewHandlerListReviewByHotel(t *testing.T) {
 	service := &fakeReviewService{
-		listResult: []sqlc.ListReviewsByHotelRow{
-			{ID: 92, Rating: 4, ReviewerName: "Guest Two", RoomTypeName: "Suite"},
-			{ID: 91, Rating: 5, ReviewerName: "Guest One", RoomTypeName: "Deluxe"},
+		listResult: review.HotelReviewResult{
+			Reviews: []sqlc.ListReviewsByHotelRow{
+				{ID: 92, Rating: 4, ReviewerName: "Guest Two", RoomTypeName: "Suite"},
+				{ID: 91, Rating: 5, ReviewerName: "Guest One", RoomTypeName: "Deluxe"},
+			},
+			Pagination: review.HotelReviewPagination{
+				Page:     2,
+				PageSize: 2,
+				HasMore:  true,
+			},
 		},
 	}
 	mux, _ := newReviewTestMux(t, service, 42)
 
-	recorder := performReviewRequest(mux, http.MethodGet, "", "/hotels/12/reviews", "")
+	recorder := performReviewRequest(mux, http.MethodGet, "", "/hotels/12/reviews?page=2&page_size=2", "")
 
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d; body = %s", recorder.Code, http.StatusOK, recorder.Body.String())
 	}
-	if !service.listCalled || service.listHotelID != 12 {
-		t.Errorf("list call = {called:%v hotelID:%d}, want {true 12}", service.listCalled, service.listHotelID)
+	if !service.listCalled {
+		t.Fatal("review service was not called")
 	}
-	var response []sqlc.ListReviewsByHotelRow
+	if service.listInput.HotelID != 12 ||
+		service.listInput.Page != 2 ||
+		service.listInput.PageSize != 2 {
+		t.Errorf("list input = %+v, want hotel=12 page=2 page_size=2", service.listInput)
+	}
+	var response review.HotelReviewResult
 	if err := json.NewDecoder(recorder.Body).Decode(&response); err != nil {
 		t.Fatalf("decode response: %v", err)
 	}
-	if len(response) != 2 || response[0].ID != 92 || response[1].ID != 91 {
+	if len(response.Reviews) != 2 || response.Reviews[0].ID != 92 || response.Reviews[1].ID != 91 {
 		t.Errorf("unexpected response: %+v", response)
+	}
+	if response.Pagination.Page != 2 ||
+		response.Pagination.PageSize != 2 ||
+		!response.Pagination.HasMore {
+		t.Errorf("unexpected pagination: %+v", response.Pagination)
 	}
 }
 
 func TestReviewHandlerListReviewByHotelReturnsEmptyArray(t *testing.T) {
-	service := &fakeReviewService{listResult: []sqlc.ListReviewsByHotelRow{}}
+	service := &fakeReviewService{listResult: review.HotelReviewResult{
+		Reviews: []sqlc.ListReviewsByHotelRow{},
+		Pagination: review.HotelReviewPagination{
+			Page:     review.DefaultReviewPage,
+			PageSize: review.DefaultReviewPageSize,
+		},
+	}}
 	mux, _ := newReviewTestMux(t, service, 42)
 
 	recorder := performReviewRequest(mux, http.MethodGet, "", "/hotels/12/reviews", "")
@@ -314,8 +337,16 @@ func TestReviewHandlerListReviewByHotelReturnsEmptyArray(t *testing.T) {
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d; body = %s", recorder.Code, http.StatusOK, recorder.Body.String())
 	}
-	if got := strings.TrimSpace(recorder.Body.String()); got != "[]" {
-		t.Errorf("body = %q, want []", got)
+	if service.listInput.Page != review.DefaultReviewPage ||
+		service.listInput.PageSize != review.DefaultReviewPageSize {
+		t.Errorf("default pagination input = %+v", service.listInput)
+	}
+	var response review.HotelReviewResult
+	if err := json.NewDecoder(recorder.Body).Decode(&response); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if response.Reviews == nil || len(response.Reviews) != 0 {
+		t.Errorf("reviews = %+v, want initialized empty array", response.Reviews)
 	}
 }
 
@@ -328,7 +359,17 @@ func TestReviewHandlerListReviewByHotelHandlesInvalidIDAndErrors(t *testing.T) {
 		wantCalled bool
 	}{
 		{name: "invalid ID", path: "/hotels/nope/reviews", wantStatus: http.StatusBadRequest},
+		{name: "non-positive ID", path: "/hotels/0/reviews", wantStatus: http.StatusBadRequest},
+		{name: "non-numeric page", path: "/hotels/12/reviews?page=first", wantStatus: http.StatusBadRequest},
+		{name: "non-positive page", path: "/hotels/12/reviews?page=0", wantStatus: http.StatusBadRequest},
+		{name: "page overflow", path: "/hotels/12/reviews?page=2147483648", wantStatus: http.StatusBadRequest},
+		{name: "non-numeric page size", path: "/hotels/12/reviews?page_size=many", wantStatus: http.StatusBadRequest},
+		{name: "non-positive page size", path: "/hotels/12/reviews?page_size=0", wantStatus: http.StatusBadRequest},
+		{name: "page size above maximum", path: "/hotels/12/reviews?page_size=101", wantStatus: http.StatusBadRequest},
+		{name: "page size overflow", path: "/hotels/12/reviews?page_size=2147483648", wantStatus: http.StatusBadRequest},
 		{name: "not found", path: "/hotels/12/reviews", err: review.ErrReviewNotFound, wantStatus: http.StatusNotFound, wantCalled: true},
+		{name: "invalid page from service", path: "/hotels/12/reviews", err: review.ErrInvalidPage, wantStatus: http.StatusBadRequest, wantCalled: true},
+		{name: "invalid page size from service", path: "/hotels/12/reviews", err: review.ErrInvalidPageSize, wantStatus: http.StatusBadRequest, wantCalled: true},
 		{name: "unexpected error", path: "/hotels/12/reviews", err: errors.New("database unavailable"), wantStatus: http.StatusInternalServerError, wantCalled: true},
 	}
 

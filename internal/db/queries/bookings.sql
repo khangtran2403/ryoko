@@ -96,8 +96,9 @@ SELECT
     updated_at
 FROM bookings
 WHERE user_id = sqlc.arg(user_id)
-ORDER BY created_at DESC, id DESC;
-
+ORDER BY created_at DESC, id DESC
+LIMIT sqlc.arg(result_limit)::bigint
+OFFSET sqlc.arg(result_offset)::bigint;
 -- name: GetBookingByIDForUser :one
 SELECT
     id,
