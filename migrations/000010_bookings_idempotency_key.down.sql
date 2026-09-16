@@ -1,0 +1,1 @@
+DROP TABLE booking_idempotency_keys;

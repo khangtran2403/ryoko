@@ -22,21 +22,23 @@ func TestCreateBookingIntegration(t *testing.T) {
 	userID, roomTypeID := insertBookingFixtures(t, pool, 1)
 
 	input := CreateInput{
-		UserID:     userID,
-		RoomTypeID: roomTypeID,
-		CheckIn:    time.Date(2030, time.January, 1, 14, 0, 0, 0, time.UTC),
-		CheckOut:   time.Date(2030, time.January, 4, 9, 0, 0, 0, time.UTC),
-		RoomsCount: 1,
-		GuestCount: 2,
+		UserID:         userID,
+		RoomTypeID:     roomTypeID,
+		CheckIn:        time.Date(2030, time.January, 1, 14, 0, 0, 0, time.UTC),
+		CheckOut:       time.Date(2030, time.January, 4, 9, 0, 0, 0, time.UTC),
+		RoomsCount:     1,
+		GuestCount:     2,
+		IdempotencyKey: "create-booking-integration",
 	}
 
 	_, err := service.CreateBooking(context.Background(), CreateInput{
-		UserID:     userID,
-		RoomTypeID: roomTypeID,
-		CheckIn:    input.CheckIn,
-		CheckOut:   input.CheckOut,
-		RoomsCount: 1,
-		GuestCount: 3,
+		UserID:         userID,
+		RoomTypeID:     roomTypeID,
+		CheckIn:        input.CheckIn,
+		CheckOut:       input.CheckOut,
+		RoomsCount:     1,
+		GuestCount:     3,
+		IdempotencyKey: input.IdempotencyKey,
 	})
 	if !errors.Is(err, ErrCapacityExceeded) {
 		t.Fatalf("capacity check error = %v, want ErrCapacityExceeded", err)
@@ -95,6 +97,45 @@ func TestCreateBookingIntegration(t *testing.T) {
 	}
 }
 
+func TestBookingKeepsPriceSnapshotAfterRoomTypePriceChanges(t *testing.T) {
+	pool, service := newBookingIntegrationService(t)
+	userID, roomTypeID := insertBookingFixtures(t, pool, 2)
+	input := futureBookingInput(userID, roomTypeID, 1)
+	input.IdempotencyKey = "price-snapshot"
+
+	created, err := service.CreateBooking(context.Background(), input)
+	if err != nil {
+		t.Fatalf("CreateBooking() error = %v", err)
+	}
+
+	if _, err := pool.Exec(
+		context.Background(),
+		"UPDATE room_types SET price_per_night = 250.00 WHERE id = $1",
+		roomTypeID,
+	); err != nil {
+		t.Fatalf("update room type price: %v", err)
+	}
+
+	stored, err := service.GetBookingByUserID(context.Background(), created.ID, userID)
+	if err != nil {
+		t.Fatalf("GetBookingByUserID() error = %v", err)
+	}
+	pricePerNight, err := stored.PricePerNight.Value()
+	if err != nil {
+		t.Fatalf("format stored price per night: %v", err)
+	}
+	totalPrice, err := stored.TotalPrice.Value()
+	if err != nil {
+		t.Fatalf("format stored total price: %v", err)
+	}
+	if pricePerNight != "100.00" {
+		t.Errorf("stored price per night = %v, want 100.00", pricePerNight)
+	}
+	if totalPrice != "300.00" {
+		t.Errorf("stored total price = %v, want 300.00", totalPrice)
+	}
+}
+
 func TestCreateBookingPreventsConcurrentOverbooking(t *testing.T) {
 	pool, service := newBookingIntegrationService(t)
 	userID, roomTypeID := insertBookingFixtures(t, pool, 1)
@@ -117,12 +158,14 @@ func TestCreateBookingPreventsConcurrentOverbooking(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	for range 2 {
-		go func() {
+	for i := range 2 {
+		go func(idempotencyKey string) {
 			<-start
-			_, err := service.CreateBooking(ctx, input)
+			request := input
+			request.IdempotencyKey = idempotencyKey
+			_, err := service.CreateBooking(ctx, request)
 			results <- result{err: err}
-		}()
+		}(fmt.Sprintf("overbooking-request-%d", i))
 	}
 	close(start)
 
@@ -148,6 +191,88 @@ func TestCreateBookingPreventsConcurrentOverbooking(t *testing.T) {
 		)
 	}
 	assertBookingCounts(t, pool, 1, 3)
+}
+
+func TestCreateBookingReplaysSameIdempotencyKey(t *testing.T) {
+	pool, service := newBookingIntegrationService(t)
+	userID, roomTypeID := insertBookingFixtures(t, pool, 2)
+	input := futureBookingInput(userID, roomTypeID, 1)
+	input.IdempotencyKey = "replay-booking"
+
+	first, err := service.CreateBooking(context.Background(), input)
+	if err != nil {
+		t.Fatalf("first CreateBooking() error = %v", err)
+	}
+	second, err := service.CreateBooking(context.Background(), input)
+	if err != nil {
+		t.Fatalf("replayed CreateBooking() error = %v", err)
+	}
+	if second.ID != first.ID {
+		t.Errorf("replayed booking ID = %d, want %d", second.ID, first.ID)
+	}
+
+	assertBookingCounts(t, pool, 1, 3)
+	assertAvailabilityRange(t, pool, roomTypeID, 3, 1, 1)
+}
+
+func TestCreateBookingRejectsReusedKeyWithDifferentPayload(t *testing.T) {
+	pool, service := newBookingIntegrationService(t)
+	userID, roomTypeID := insertBookingFixtures(t, pool, 2)
+	input := futureBookingInput(userID, roomTypeID, 1)
+	input.IdempotencyKey = "conflicting-booking"
+
+	created, err := service.CreateBooking(context.Background(), input)
+	if err != nil {
+		t.Fatalf("first CreateBooking() error = %v", err)
+	}
+	conflicting := input
+	conflicting.GuestCount = 2
+
+	_, err = service.CreateBooking(context.Background(), conflicting)
+	if !errors.Is(err, ErrIdempotencyKeyConflict) {
+		t.Fatalf("conflicting CreateBooking() error = %v, want ErrIdempotencyKeyConflict", err)
+	}
+
+	assertBookingCounts(t, pool, 1, 3)
+	assertBookingStatus(t, pool, created.ID, "confirmed")
+	assertAvailabilityRange(t, pool, roomTypeID, 3, 1, 1)
+}
+
+func TestCreateBookingCoalescesConcurrentIdenticalRequests(t *testing.T) {
+	pool, service := newBookingIntegrationService(t)
+	userID, roomTypeID := insertBookingFixtures(t, pool, 2)
+	input := futureBookingInput(userID, roomTypeID, 1)
+	input.IdempotencyKey = "concurrent-replay"
+
+	start := make(chan struct{})
+	results := make(chan sqlc.Booking, 2)
+	errorsChannel := make(chan error, 2)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	for range 2 {
+		go func() {
+			<-start
+			created, err := service.CreateBooking(ctx, input)
+			results <- created
+			errorsChannel <- err
+		}()
+	}
+	close(start)
+
+	first := <-results
+	second := <-results
+	for range 2 {
+		if err := <-errorsChannel; err != nil {
+			t.Fatalf("concurrent CreateBooking() error = %v", err)
+		}
+	}
+	if first.ID == 0 || second.ID != first.ID {
+		t.Errorf("concurrent booking IDs = [%d, %d], want the same non-zero ID", first.ID, second.ID)
+	}
+
+	assertBookingCounts(t, pool, 1, 3)
+	assertAvailabilityRange(t, pool, roomTypeID, 3, 1, 1)
 }
 
 func TestCancelBookingRestoresAvailabilityExactlyOnce(t *testing.T) {
@@ -315,12 +440,13 @@ func TestCancelBookingRejectsStartedStay(t *testing.T) {
 		return currentTime
 	}
 	created, err := service.CreateBooking(context.Background(), CreateInput{
-		UserID:     userID,
-		RoomTypeID: roomTypeID,
-		CheckIn:    time.Date(2030, time.January, 2, 0, 0, 0, 0, time.UTC),
-		CheckOut:   time.Date(2030, time.January, 4, 0, 0, 0, 0, time.UTC),
-		RoomsCount: 1,
-		GuestCount: 1,
+		UserID:         userID,
+		RoomTypeID:     roomTypeID,
+		CheckIn:        time.Date(2030, time.January, 2, 0, 0, 0, 0, time.UTC),
+		CheckOut:       time.Date(2030, time.January, 4, 0, 0, 0, 0, time.UTC),
+		RoomsCount:     1,
+		GuestCount:     1,
+		IdempotencyKey: "started-stay",
 	})
 	if err != nil {
 		t.Fatalf("CreateBooking() error = %v", err)
@@ -837,12 +963,13 @@ func assertBookingCounts(
 func futureBookingInput(userID, roomTypeID int64, roomsCount int32) CreateInput {
 	checkIn := utcDate(time.Now()).AddDate(1, 0, 0)
 	return CreateInput{
-		UserID:     userID,
-		RoomTypeID: roomTypeID,
-		CheckIn:    checkIn,
-		CheckOut:   checkIn.AddDate(0, 0, 3),
-		RoomsCount: roomsCount,
-		GuestCount: roomsCount,
+		UserID:         userID,
+		RoomTypeID:     roomTypeID,
+		CheckIn:        checkIn,
+		CheckOut:       checkIn.AddDate(0, 0, 3),
+		RoomsCount:     roomsCount,
+		GuestCount:     roomsCount,
+		IdempotencyKey: "future-booking",
 	}
 }
 

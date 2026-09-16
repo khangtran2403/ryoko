@@ -9,12 +9,13 @@ import (
 
 func TestCreateBookingValidatesInputBeforeStartingTransaction(t *testing.T) {
 	valid := CreateInput{
-		UserID:     1,
-		RoomTypeID: 1,
-		CheckIn:    time.Date(2030, time.January, 1, 0, 0, 0, 0, time.UTC),
-		CheckOut:   time.Date(2030, time.January, 2, 0, 0, 0, 0, time.UTC),
-		RoomsCount: 1,
-		GuestCount: 1,
+		UserID:         1,
+		RoomTypeID:     1,
+		CheckIn:        time.Date(2030, time.January, 1, 0, 0, 0, 0, time.UTC),
+		CheckOut:       time.Date(2030, time.January, 2, 0, 0, 0, 0, time.UTC),
+		RoomsCount:     1,
+		GuestCount:     1,
+		IdempotencyKey: "create-booking-test",
 	}
 
 	tests := []struct {
@@ -85,6 +86,27 @@ func TestCreateBookingValidatesInputBeforeStartingTransaction(t *testing.T) {
 				input.RoomTypeID = 0
 			},
 			wantErr: ErrRoomTypeNotFound,
+		},
+		{
+			name: "missing idempotency key",
+			mutate: func(input *CreateInput) {
+				input.IdempotencyKey = ""
+			},
+			wantErr: ErrInvalidIdempotencyKey,
+		},
+		{
+			name: "whitespace-only idempotency key",
+			mutate: func(input *CreateInput) {
+				input.IdempotencyKey = "   "
+			},
+			wantErr: ErrInvalidIdempotencyKey,
+		},
+		{
+			name: "idempotency key above maximum length",
+			mutate: func(input *CreateInput) {
+				input.IdempotencyKey = string(make([]byte, 256))
+			},
+			wantErr: ErrInvalidIdempotencyKey,
 		},
 	}
 

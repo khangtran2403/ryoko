@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/khangtran2403/ryoko/internal/auth"
 	"github.com/khangtran2403/ryoko/internal/booking"
 	"github.com/khangtran2403/ryoko/internal/db/sqlc"
@@ -82,14 +83,7 @@ func (f *fakeBookingCreator) CancelBooking(
 
 func TestBookingHandlerCreateBooking(t *testing.T) {
 	service := &fakeBookingCreator{
-		booking: sqlc.Booking{
-			ID:         99,
-			UserID:     42,
-			RoomTypeID: 7,
-			RoomsCount: 2,
-			GuestCount: 3,
-			Status:     "confirmed",
-		},
+		booking: bookingTestModel(99, 42, 7, "confirmed"),
 	}
 	mux, token := newAuthenticatedBookingMux(t, service, 42)
 
@@ -124,15 +118,21 @@ func TestBookingHandlerCreateBooking(t *testing.T) {
 	if service.input.GuestCount != 3 {
 		t.Errorf("GuestCount = %d, want 3", service.input.GuestCount)
 	}
+	if service.input.IdempotencyKey != "test-idempotency-key" {
+		t.Errorf("IdempotencyKey = %q, want test-idempotency-key", service.input.IdempotencyKey)
+	}
 	assertDate(t, service.input.CheckIn, "2026-09-10")
 	assertDate(t, service.input.CheckOut, "2026-09-13")
 
-	var response sqlc.Booking
+	var response BookingResponse
 	if err := json.NewDecoder(recorder.Body).Decode(&response); err != nil {
 		t.Fatalf("decode response: %v", err)
 	}
 	if response.ID != 99 {
 		t.Errorf("response booking ID = %d, want 99", response.ID)
+	}
+	if response.NumberOfNights != 3 || response.PricePerNight != "100.00" || response.TotalPrice != "300.00" {
+		t.Errorf("response price breakdown = %+v", response)
 	}
 }
 
@@ -170,6 +170,26 @@ func TestBookingHandlerCreateBookingRejectsMissingPrincipal(t *testing.T) {
 	}
 	if service.called {
 		t.Fatal("booking service was called without a principal in the request context")
+	}
+}
+
+func TestBookingHandlerCreateBookingRequiresIdempotencyKey(t *testing.T) {
+	service := &fakeBookingCreator{}
+	mux, token := newAuthenticatedBookingMux(t, service, 42)
+
+	recorder := performBookingRequestWithKey(
+		mux,
+		token,
+		"/room-types/7/bookings",
+		validBookingBody(),
+		"",
+	)
+
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d; body = %s", recorder.Code, http.StatusBadRequest, recorder.Body.String())
+	}
+	if service.called {
+		t.Fatal("booking service was called without an idempotency key")
 	}
 }
 
@@ -236,6 +256,8 @@ func TestBookingHandlerCreateBookingMapsServiceErrors(t *testing.T) {
 		{name: "capacity exceeded", err: booking.ErrCapacityExceeded, wantStatus: http.StatusBadRequest},
 		{name: "room type not found", err: booking.ErrRoomTypeNotFound, wantStatus: http.StatusNotFound},
 		{name: "unavailable", err: booking.ErrUnavailable, wantStatus: http.StatusConflict},
+		{name: "idempotency conflict", err: booking.ErrIdempotencyKeyConflict, wantStatus: http.StatusConflict},
+		{name: "invalid idempotency key", err: booking.ErrInvalidIdempotencyKey, wantStatus: http.StatusBadRequest},
 		{name: "invalid user", err: booking.ErrInvalidUser, wantStatus: http.StatusUnauthorized},
 		{name: "unexpected error", err: errors.New("database unavailable"), wantStatus: http.StatusInternalServerError},
 	}
@@ -259,14 +281,7 @@ func TestBookingHandlerCreateBookingMapsServiceErrors(t *testing.T) {
 
 func TestBookingHandlerGetBookingByUserID(t *testing.T) {
 	service := &fakeBookingCreator{
-		getBooking: sqlc.Booking{
-			ID:         88,
-			UserID:     42,
-			RoomTypeID: 7,
-			RoomsCount: 1,
-			GuestCount: 2,
-			Status:     "confirmed",
-		},
+		getBooking: bookingTestModel(88, 42, 7, "confirmed"),
 	}
 	mux, token := newAuthenticatedBookingMux(t, service, 42)
 
@@ -288,7 +303,7 @@ func TestBookingHandlerGetBookingByUserID(t *testing.T) {
 		t.Errorf("user ID = %d, want authenticated user ID 42", service.userID)
 	}
 
-	var response sqlc.Booking
+	var response BookingResponse
 	if err := json.NewDecoder(recorder.Body).Decode(&response); err != nil {
 		t.Fatalf("decode response: %v", err)
 	}
@@ -350,8 +365,8 @@ func TestBookingHandlerListBookingsByUser(t *testing.T) {
 	service := &fakeBookingCreator{
 		listResult: booking.ListBookingsResult{
 			Bookings: []sqlc.Booking{
-				{ID: 91, UserID: 42, RoomTypeID: 7, Status: "confirmed"},
-				{ID: 90, UserID: 42, RoomTypeID: 8, Status: "completed"},
+				bookingTestModel(91, 42, 7, "confirmed"),
+				bookingTestModel(90, 42, 8, "completed"),
 			},
 			Pagination: booking.BookingPagination{
 				Page:     2,
@@ -379,7 +394,7 @@ func TestBookingHandlerListBookingsByUser(t *testing.T) {
 		t.Errorf("list input = %+v, want user=42 page=2 page_size=2", service.listInput)
 	}
 
-	var response booking.ListBookingsResult
+	var response ListBookingsResponse
 	if err := json.NewDecoder(recorder.Body).Decode(&response); err != nil {
 		t.Fatalf("decode response: %v", err)
 	}
@@ -415,7 +430,7 @@ func TestBookingHandlerListBookingsByUserReturnsEmptyArray(t *testing.T) {
 		service.listInput.PageSize != booking.DefaultBookingPageSize {
 		t.Errorf("default pagination input = %+v", service.listInput)
 	}
-	var response booking.ListBookingsResult
+	var response ListBookingsResponse
 	if err := json.NewDecoder(recorder.Body).Decode(&response); err != nil {
 		t.Fatalf("decode response: %v", err)
 	}
@@ -513,14 +528,7 @@ func TestBookingHandlerReadEndpointsRejectUnauthenticatedRequests(t *testing.T) 
 
 func TestBookingHandlerCancelBooking(t *testing.T) {
 	service := &fakeBookingCreator{
-		cancelBooking: sqlc.Booking{
-			ID:         88,
-			UserID:     42,
-			RoomTypeID: 7,
-			RoomsCount: 1,
-			GuestCount: 2,
-			Status:     "cancelled",
-		},
+		cancelBooking: bookingTestModel(88, 42, 7, "cancelled"),
 	}
 	mux, token := newAuthenticatedBookingMux(t, service, 42)
 
@@ -542,7 +550,7 @@ func TestBookingHandlerCancelBooking(t *testing.T) {
 		t.Errorf("user ID = %d, want authenticated user ID 42", service.userID)
 	}
 
-	var response sqlc.Booking
+	var response BookingResponse
 	if err := json.NewDecoder(recorder.Body).Decode(&response); err != nil {
 		t.Fatalf("decode response: %v", err)
 	}
@@ -990,8 +998,21 @@ func newAuthenticatedBookingMux(t *testing.T, service bookingService, userID int
 }
 
 func performBookingRequest(handler http.Handler, token, path, body string) *httptest.ResponseRecorder {
+	return performBookingRequestWithKey(handler, token, path, body, "test-idempotency-key")
+}
+
+func performBookingRequestWithKey(
+	handler http.Handler,
+	token string,
+	path string,
+	body string,
+	idempotencyKey string,
+) *httptest.ResponseRecorder {
 	request := httptest.NewRequest(http.MethodPost, path, strings.NewReader(body))
 	request.Header.Set("Content-Type", "application/json")
+	if idempotencyKey != "" {
+		request.Header.Set("Idempotency-Key", idempotencyKey)
+	}
 	if token != "" {
 		request.Header.Set("Authorization", "Bearer "+token)
 	}
@@ -1022,5 +1043,31 @@ func assertDate(t *testing.T, got time.Time, want string) {
 	}
 	if !got.Equal(wantDate) {
 		t.Errorf("date = %s, want %s", got.Format(time.DateOnly), want)
+	}
+}
+
+func bookingTestModel(id, userID, roomTypeID int64, status string) sqlc.Booking {
+	var pricePerNight pgtype.Numeric
+	if err := pricePerNight.Scan("100.00"); err != nil {
+		panic(err)
+	}
+	var totalPrice pgtype.Numeric
+	if err := totalPrice.Scan("300.00"); err != nil {
+		panic(err)
+	}
+
+	return sqlc.Booking{
+		ID:            id,
+		UserID:        userID,
+		RoomTypeID:    roomTypeID,
+		CheckIn:       pgtype.Date{Time: time.Date(2026, time.September, 10, 0, 0, 0, 0, time.UTC), Valid: true},
+		CheckOut:      pgtype.Date{Time: time.Date(2026, time.September, 13, 0, 0, 0, 0, time.UTC), Valid: true},
+		RoomsCount:    1,
+		GuestCount:    2,
+		PricePerNight: pricePerNight,
+		TotalPrice:    totalPrice,
+		Status:        status,
+		CreatedAt:     pgtype.Timestamptz{Time: time.Date(2026, time.September, 1, 10, 0, 0, 0, time.UTC), Valid: true},
+		UpdatedAt:     pgtype.Timestamptz{Time: time.Date(2026, time.September, 1, 10, 0, 0, 0, time.UTC), Valid: true},
 	}
 }

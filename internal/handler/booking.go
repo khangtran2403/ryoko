@@ -42,6 +42,12 @@ type CreateBookingRequest struct {
 
 func (h *BookingHandler) CreateBooking(w http.ResponseWriter, r *http.Request) {
 	var req CreateBookingRequest
+	principal, ok := middleware.PrincipalFromContext(r.Context())
+	if !ok {
+		w.Header().Set("WWW-Authenticate", "Bearer")
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
 	roomTypeID := r.PathValue("roomTypeID")
 	convID, err := strconv.ParseInt(roomTypeID, 10, 64)
 	if err != nil {
@@ -52,10 +58,9 @@ func (h *BookingHandler) CreateBooking(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Room type ID must be positive", http.StatusBadRequest)
 		return
 	}
-	principal, ok := middleware.PrincipalFromContext(r.Context())
-	if !ok {
-		w.Header().Set("WWW-Authenticate", "Bearer")
-		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+	idempotencyKey := r.Header.Get("Idempotency-Key")
+	if idempotencyKey == "" {
+		http.Error(w, "Idempotency-Key header is required", http.StatusBadRequest)
 		return
 	}
 	err = json.NewDecoder(r.Body).Decode(&req)
@@ -77,12 +82,13 @@ func (h *BookingHandler) CreateBooking(w http.ResponseWriter, r *http.Request) {
 	created, err := h.service.CreateBooking(
 		r.Context(),
 		booking.CreateInput{
-			UserID:     principal.UserID,
-			RoomTypeID: convID,
-			CheckIn:    checkIn,
-			CheckOut:   checkOut,
-			RoomsCount: req.RoomsCount,
-			GuestCount: req.GuestCount,
+			UserID:         principal.UserID,
+			RoomTypeID:     convID,
+			CheckIn:        checkIn,
+			CheckOut:       checkOut,
+			RoomsCount:     req.RoomsCount,
+			GuestCount:     req.GuestCount,
+			IdempotencyKey: idempotencyKey,
 		},
 	)
 	switch {
@@ -90,7 +96,8 @@ func (h *BookingHandler) CreateBooking(w http.ResponseWriter, r *http.Request) {
 		errors.Is(err, booking.ErrInvalidRooms),
 		errors.Is(err, booking.ErrInvalidGuests),
 		errors.Is(err, booking.ErrCheckInInPast),
-		errors.Is(err, booking.ErrCapacityExceeded):
+		errors.Is(err, booking.ErrCapacityExceeded),
+		errors.Is(err, booking.ErrInvalidIdempotencyKey):
 		http.Error(w, err.Error(), http.StatusBadRequest)
 
 	case errors.Is(err, booking.ErrRoomTypeNotFound):
@@ -98,6 +105,8 @@ func (h *BookingHandler) CreateBooking(w http.ResponseWriter, r *http.Request) {
 
 	case errors.Is(err, booking.ErrUnavailable):
 		http.Error(w, "Requested rooms are unavailable", http.StatusConflict)
+	case errors.Is(err, booking.ErrIdempotencyKeyConflict):
+		http.Error(w, "Idempotency key hash conflict", http.StatusConflict)
 
 	case errors.Is(err, booking.ErrInvalidUser):
 		http.Error(w, "Unauthorized", http.StatusUnauthorized)
@@ -106,9 +115,14 @@ func (h *BookingHandler) CreateBooking(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Failed to create booking", http.StatusInternalServerError)
 
 	default:
+		response, err := bookingResponseFromModel(created)
+		if err != nil {
+			http.Error(w, "Failed to format booking", http.StatusInternalServerError)
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusCreated)
-		json.NewEncoder(w).Encode(created)
+		json.NewEncoder(w).Encode(response)
 	}
 }
 func (h *BookingHandler) GetBookingByUserID(w http.ResponseWriter, r *http.Request) {
@@ -137,9 +151,14 @@ func (h *BookingHandler) GetBookingByUserID(w http.ResponseWriter, r *http.Reque
 		http.Error(w, "get booking failed", http.StatusInternalServerError)
 		return
 	}
+	response, err := bookingResponseFromModel(getBooking)
+	if err != nil {
+		http.Error(w, "Failed to format booking", http.StatusInternalServerError)
+		return
+	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(getBooking)
+	json.NewEncoder(w).Encode(response)
 }
 func (h *BookingHandler) ListBookingsByUser(w http.ResponseWriter, r *http.Request) {
 	query := r.URL.Query()
@@ -184,9 +203,14 @@ func (h *BookingHandler) ListBookingsByUser(w http.ResponseWriter, r *http.Reque
 		http.Error(w, "list booking failed", http.StatusInternalServerError)
 		return
 	}
+	response, err := listBookingsResponseFromResult(listBooking)
+	if err != nil {
+		http.Error(w, "Failed to format bookings", http.StatusInternalServerError)
+		return
+	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(listBooking)
+	json.NewEncoder(w).Encode(response)
 }
 func (h *BookingHandler) CancelBooking(w http.ResponseWriter, r *http.Request) {
 	getID := r.PathValue("bookingID")
@@ -218,9 +242,14 @@ func (h *BookingHandler) CancelBooking(w http.ResponseWriter, r *http.Request) {
 		return
 
 	default:
+		response, err := bookingResponseFromModel(cancelBooking)
+		if err != nil {
+			http.Error(w, "Failed to format booking", http.StatusInternalServerError)
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		json.NewEncoder(w).Encode(cancelBooking)
+		json.NewEncoder(w).Encode(response)
 	}
 }
 func (h *BookingHandler) ListAvailableRoomTypes(w http.ResponseWriter, r *http.Request) {

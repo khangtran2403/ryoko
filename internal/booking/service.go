@@ -1,7 +1,9 @@
 package booking
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"strings"
@@ -14,21 +16,23 @@ import (
 )
 
 var (
-	ErrInvalidDates          = errors.New("invalid booking dates")
-	ErrInvalidRooms          = errors.New("invalid room count")
-	ErrInvalidGuests         = errors.New("invalid guest count")
-	ErrRoomTypeNotFound      = errors.New("room type not found")
-	ErrCapacityExceeded      = errors.New("room capacity exceeded")
-	ErrUnavailable           = errors.New("rooms unavailable")
-	ErrInvalidUser           = errors.New("invalid user")
-	ErrBookingNotFound       = errors.New("booking not found")
-	ErrBookingNotCancellable = errors.New("booking cannot be cancelled")
-	ErrInvalidHotelID        = errors.New("hotel ID must be positive")
-	ErrCheckInInPast         = errors.New("check-in date cannot be in the past")
-	ErrInvalidCity           = errors.New("city must not be empty")
-	ErrInvalidPage           = errors.New("page must be a positive integer")
-	ErrInvalidPageSize       = errors.New("page_size must be between 1 and 100")
-	ErrInvalidSort           = errors.New("sort must be price_asc or price_desc")
+	ErrInvalidDates           = errors.New("invalid booking dates")
+	ErrInvalidRooms           = errors.New("invalid room count")
+	ErrInvalidGuests          = errors.New("invalid guest count")
+	ErrRoomTypeNotFound       = errors.New("room type not found")
+	ErrCapacityExceeded       = errors.New("room capacity exceeded")
+	ErrUnavailable            = errors.New("rooms unavailable")
+	ErrInvalidUser            = errors.New("invalid user")
+	ErrBookingNotFound        = errors.New("booking not found")
+	ErrBookingNotCancellable  = errors.New("booking cannot be cancelled")
+	ErrInvalidHotelID         = errors.New("hotel ID must be positive")
+	ErrCheckInInPast          = errors.New("check-in date cannot be in the past")
+	ErrInvalidCity            = errors.New("city must not be empty")
+	ErrInvalidPage            = errors.New("page must be a positive integer")
+	ErrInvalidPageSize        = errors.New("page_size must be between 1 and 100")
+	ErrInvalidSort            = errors.New("sort must be price_asc or price_desc")
+	ErrIdempotencyKeyConflict = errors.New("idempotency key hash conflict")
+	ErrInvalidIdempotencyKey  = errors.New("idempotency key is missing or invalid")
 )
 
 const (
@@ -43,12 +47,13 @@ const (
 )
 
 type CreateInput struct {
-	UserID     int64     `json:"user_id"`
-	RoomTypeID int64     `json:"room_type_id"`
-	CheckIn    time.Time `json:"check_in"`
-	CheckOut   time.Time `json:"check_out"`
-	RoomsCount int32     `json:"rooms_count"`
-	GuestCount int32     `json:"guest_count"`
+	UserID         int64     `json:"user_id"`
+	RoomTypeID     int64     `json:"room_type_id"`
+	CheckIn        time.Time `json:"check_in"`
+	CheckOut       time.Time `json:"check_out"`
+	RoomsCount     int32     `json:"rooms_count"`
+	GuestCount     int32     `json:"guest_count"`
+	IdempotencyKey string    `json:"idempotency_key"`
 }
 type AvailabilityInput struct {
 	HotelID    int64
@@ -111,6 +116,8 @@ func NewService(pool *pgxpool.Pool, queries *sqlc.Queries) *Service {
 func (s *Service) CreateBooking(ctx context.Context, input CreateInput) (sqlc.Booking, error) {
 	// Validate input
 	checkInDate, checkOutDate, err := s.validateStayDates(input.CheckIn, input.CheckOut)
+	var checkIn, checkOut pgtype.Date
+	var roomType sqlc.GetRoomTypeForBookingRow
 	if err != nil {
 		return sqlc.Booking{}, err
 	}
@@ -127,7 +134,9 @@ func (s *Service) CreateBooking(ctx context.Context, input CreateInput) (sqlc.Bo
 		return sqlc.Booking{}, ErrRoomTypeNotFound
 	}
 	nights := int(checkOutDate.Sub(checkInDate) / (24 * time.Hour))
-
+	if strings.TrimSpace(input.IdempotencyKey) == "" || len(input.IdempotencyKey) > 255 {
+		return sqlc.Booking{}, ErrInvalidIdempotencyKey
+	}
 	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{
 		IsoLevel: pgx.ReadCommitted,
 	})
@@ -138,71 +147,116 @@ func (s *Service) CreateBooking(ctx context.Context, input CreateInput) (sqlc.Bo
 
 	qtx := s.queries.WithTx(tx)
 
-	roomType, err := qtx.GetRoomTypeForBooking(ctx, input.RoomTypeID)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return sqlc.Booking{}, ErrRoomTypeNotFound
-	}
-	if err != nil {
-		return sqlc.Booking{}, fmt.Errorf("get room type: %w", err)
-	}
-
-	maximunGuests := int64(roomType.Capacity) * int64(input.RoomsCount)
-	if int64(input.GuestCount) > maximunGuests {
-		return sqlc.Booking{}, ErrCapacityExceeded
-	}
-	if input.RoomsCount > roomType.TotalRooms {
-		return sqlc.Booking{}, ErrUnavailable
-	}
-	checkIn := pgtype.Date{
-		Time:  checkInDate,
-		Valid: true,
-	}
-
-	checkOut := pgtype.Date{
-		Time:  checkOutDate,
-		Valid: true,
-	}
-	err = qtx.EnsureAvailabilityRows(ctx, sqlc.EnsureAvailabilityRowsParams{
-		CheckIn:    checkIn,
-		CheckOut:   checkOut,
-		RoomTypeID: input.RoomTypeID,
+	sum := sha256.Sum256([]byte(fmt.Sprintf("%d:%d:%s:%s:%d:%d", input.UserID, input.RoomTypeID, checkInDate.Format("2006-01-02"), checkOutDate.Format("2006-01-02"), input.RoomsCount, input.GuestCount)))
+	requestHash := sum[:]
+	claim, err := qtx.ClaimBookingIdempotencyKey(ctx, sqlc.ClaimBookingIdempotencyKeyParams{
+		UserID:         input.UserID,
+		IdempotencyKey: input.IdempotencyKey,
+		RequestHash:    requestHash,
 	})
-	if err != nil {
-		return sqlc.Booking{}, fmt.Errorf("availability rows: %w", err)
-	}
-	rows, err := qtx.LockAvailabilityRows(ctx, sqlc.LockAvailabilityRowsParams{
-		RoomTypeID: input.RoomTypeID,
-		CheckIn:    checkIn,
-		CheckOut:   checkOut,
-	})
-	if err != nil {
-		return sqlc.Booking{}, fmt.Errorf(
-			"lock availability rows: %w",
-			err,
+	switch {
+	case err != nil:
+		return sqlc.Booking{}, fmt.Errorf("claim idempotency key: %w", err)
+	case claim == 0:
+		claimExist, err := qtx.GetBookingIdempotencyKey(ctx, sqlc.GetBookingIdempotencyKeyParams{
+			UserID:         input.UserID,
+			IdempotencyKey: input.IdempotencyKey,
+		})
+		if errors.Is(err, pgx.ErrNoRows) {
+			return sqlc.Booking{}, fmt.Errorf("idempotency key not found: %w", err)
+		}
+		if err != nil {
+			return sqlc.Booking{}, fmt.Errorf("get idempotency key: %w", err)
+		}
+		if !bytes.Equal(requestHash, claimExist.RequestHash) {
+			return sqlc.Booking{}, ErrIdempotencyKeyConflict
+		}
+		if !claimExist.BookingID.Valid {
+			return sqlc.Booking{}, errors.New("idempotency invariant violated: booking ID is missing")
+		}
+		existing, err := qtx.GetBookingByIDForUser(
+			ctx,
+			sqlc.GetBookingByIDForUserParams{
+				BookingID: claimExist.BookingID.Int64,
+				UserID:    input.UserID,
+			},
 		)
-	}
-	if len(rows) != nights {
-		return sqlc.Booking{}, fmt.Errorf("availability invariant violated: got %d rows for %d nights",
-			len(rows),
-			nights)
-	}
-	for _, row := range rows {
-		if row.RoomsBooked > roomType.TotalRooms-input.RoomsCount {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return sqlc.Booking{}, fmt.Errorf("booking not found for idempotency key: %w", err)
+		}
+		if err != nil {
+			return sqlc.Booking{}, fmt.Errorf("get booking for idempotency key: %w", err)
+		}
+		return existing, nil
+
+	case claim == 1:
+
+		roomType, err := qtx.GetRoomTypeForBooking(ctx, input.RoomTypeID)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return sqlc.Booking{}, ErrRoomTypeNotFound
+		}
+		if err != nil {
+			return sqlc.Booking{}, fmt.Errorf("get room type: %w", err)
+		}
+
+		maximunGuests := int64(roomType.Capacity) * int64(input.RoomsCount)
+		if int64(input.GuestCount) > maximunGuests {
+			return sqlc.Booking{}, ErrCapacityExceeded
+		}
+		if input.RoomsCount > roomType.TotalRooms {
 			return sqlc.Booking{}, ErrUnavailable
 		}
-	}
-	affected, err := qtx.IncrementAvailability(ctx, sqlc.IncrementAvailabilityParams{
-		RoomsCount: input.RoomsCount,
-		RoomTypeID: input.RoomTypeID,
-		CheckIn:    checkIn,
-		CheckOut:   checkOut,
-		TotalRooms: roomType.TotalRooms,
-	})
-	if err != nil {
-		return sqlc.Booking{}, fmt.Errorf("increment availability: %w", err)
-	}
-	if affected != int64(nights) {
-		return sqlc.Booking{}, ErrUnavailable
+		checkIn = pgtype.Date{
+			Time:  checkInDate,
+			Valid: true,
+		}
+
+		checkOut = pgtype.Date{
+			Time:  checkOutDate,
+			Valid: true,
+		}
+		err = qtx.EnsureAvailabilityRows(ctx, sqlc.EnsureAvailabilityRowsParams{
+			CheckIn:    checkIn,
+			CheckOut:   checkOut,
+			RoomTypeID: input.RoomTypeID,
+		})
+		if err != nil {
+			return sqlc.Booking{}, fmt.Errorf("availability rows: %w", err)
+		}
+		rows, err := qtx.LockAvailabilityRows(ctx, sqlc.LockAvailabilityRowsParams{
+			RoomTypeID: input.RoomTypeID,
+			CheckIn:    checkIn,
+			CheckOut:   checkOut,
+		})
+		if err != nil {
+			return sqlc.Booking{}, fmt.Errorf(
+				"lock availability rows: %w",
+				err,
+			)
+		}
+		if len(rows) != nights {
+			return sqlc.Booking{}, fmt.Errorf("availability invariant violated: got %d rows for %d nights",
+				len(rows),
+				nights)
+		}
+		for _, row := range rows {
+			if row.RoomsBooked > roomType.TotalRooms-input.RoomsCount {
+				return sqlc.Booking{}, ErrUnavailable
+			}
+		}
+		affected, err := qtx.IncrementAvailability(ctx, sqlc.IncrementAvailabilityParams{
+			RoomsCount: input.RoomsCount,
+			RoomTypeID: input.RoomTypeID,
+			CheckIn:    checkIn,
+			CheckOut:   checkOut,
+			TotalRooms: roomType.TotalRooms,
+		})
+		if err != nil {
+			return sqlc.Booking{}, fmt.Errorf("increment availability: %w", err)
+		}
+		if affected != int64(nights) {
+			return sqlc.Booking{}, ErrUnavailable
+		}
 	}
 	createBooking, err := qtx.CreateBooking(ctx, sqlc.CreateBookingParams{
 		UserID:        input.UserID,
@@ -216,13 +270,30 @@ func (s *Service) CreateBooking(ctx context.Context, input CreateInput) (sqlc.Bo
 	if err != nil {
 		return sqlc.Booking{}, fmt.Errorf("create booking: %w", err)
 	}
+	bookingID := pgtype.Int8{Int64: createBooking.ID, Valid: true}
+	if bookingID.Valid {
+		attachment, err := qtx.AttachBookingToIdempotencyKey(ctx, sqlc.AttachBookingToIdempotencyKeyParams{
+			UserID:         input.UserID,
+			IdempotencyKey: input.IdempotencyKey,
+			RequestHash:    requestHash,
+			BookingID:      bookingID,
+		})
+		if err != nil {
+			return sqlc.Booking{}, fmt.Errorf("attach idempotency key: %w", err)
+		}
+		if attachment != 1 {
+			return sqlc.Booking{}, fmt.Errorf("failed to attach booking to idempotency key")
+		}
+	}
 	if err := tx.Commit(ctx); err != nil {
 		return sqlc.Booking{}, fmt.Errorf(
 			"commit booking transaction: %w",
 			err,
 		)
 	}
+
 	return createBooking, nil
+
 }
 func (s *Service) GetBookingByUserID(ctx context.Context, bookingID int64, userID int64) (sqlc.Booking, error) {
 	if bookingID <= 0 {
