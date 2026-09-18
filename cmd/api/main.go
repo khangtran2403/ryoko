@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/khangtran2403/ryoko/internal/admin_booking"
 	"github.com/khangtran2403/ryoko/internal/auth"
 	"github.com/khangtran2403/ryoko/internal/booking"
 	"github.com/khangtran2403/ryoko/internal/config"
@@ -59,12 +60,14 @@ func main() {
 	authHandler := handler.NewAuthHandler(queries, tokenManager)
 	authMiddleware := middleware.NewAuthMiddleware(tokenManager)
 	bookingService := booking.NewService(pool, queries)
+	newAdminBookingService := admin_booking.NewService(queries)
 	completionWorker := booking.NewCompletionWorker(
 		bookingService,
 		time.Hour,
 		log.Default(),
 	)
 	bookingHandler := handler.NewBookingHandler(bookingService)
+	adminBookingHandler := handler.NewAdminBookingHandler(newAdminBookingService)
 	reviewService := review.NewService(queries)
 	reviewHandler := handler.NewReviewHandler(reviewService)
 	hotelImageService := hotelimages.NewService(pool, queries)
@@ -98,6 +101,7 @@ func main() {
 	mux.Handle("POST /hotels/{hotelID}/amenities", adminOnly(amenityHandler.AddAmenityToHotel))
 	mux.HandleFunc("GET /hotels/{hotelID}/amenities", amenityHandler.ListAmenitiesByHotel)
 	mux.Handle("DELETE /hotels/{hotelID}/amenities/{amenityID}", adminOnly(amenityHandler.RemoveAmenitiesFromHotel))
+	mux.Handle("GET /admin/bookings", adminOnly(adminBookingHandler.ListBookingsForAdmin))
 	mux.Handle(
 		"GET /me",
 		authMiddleware.Authenticate(
