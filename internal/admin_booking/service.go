@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/khangtran2403/ryoko/internal/db/sqlc"
 )
@@ -16,6 +17,7 @@ var (
 	ErrInvalidPage      = errors.New("page must be a positive integer")
 	ErrInvalidPageSize  = errors.New("page_size must be between 1 and 100")
 	ErrInvalidStatus    = errors.New("status must be one of 'completed', 'cancelled', or 'confirmed'")
+	ErrBookingNotFound  = errors.New("booking not found")
 )
 
 const (
@@ -127,4 +129,24 @@ func (s *Service) ListBookingsForAdmin(ctx context.Context, input ListBookingsFo
 			HasMore:  hasMore,
 		},
 	}, nil
+}
+func (s *Service) ListBookingHistoryForAdmin(ctx context.Context, bookingID int64) ([]sqlc.BookingStatusHistory, error) {
+	if bookingID <= 0 {
+		return nil, ErrBookingNotFound
+	}
+	getBooking, err := s.queries.GetBookingByIDForAdmin(ctx, bookingID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrBookingNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("get booking: %w", err)
+	}
+	history, err := s.queries.ListBookingStatusHistoryForAdmin(ctx, getBooking.ID)
+	if err != nil {
+		return nil, fmt.Errorf("list booking history for admin: %w", err)
+	}
+	if history == nil {
+		history = []sqlc.BookingStatusHistory{}
+	}
+	return history, nil
 }

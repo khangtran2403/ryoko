@@ -42,6 +42,11 @@ type fakeBookingCreator struct {
 	hotelSearchInput   booking.HotelSearchInput
 	hotelSearchResult  booking.HotelSearchResult
 	hotelSearchErr     error
+	historyCalled      bool
+	historyBookingID   int64
+	historyUserID      int64
+	historyResult      []sqlc.BookingStatusHistory
+	historyErr         error
 }
 
 func (f *fakeBookingCreator) CreateBooking(_ context.Context, input booking.CreateInput) (sqlc.Booking, error) {
@@ -79,6 +84,17 @@ func (f *fakeBookingCreator) CancelBooking(
 	f.bookingID = bookingID
 	f.userID = userID
 	return f.cancelBooking, f.cancelErr
+}
+
+func (f *fakeBookingCreator) ListBookingsHistoryByUser(
+	_ context.Context,
+	bookingID int64,
+	userID int64,
+) ([]sqlc.BookingStatusHistory, error) {
+	f.historyCalled = true
+	f.historyBookingID = bookingID
+	f.historyUserID = userID
+	return f.historyResult, f.historyErr
 }
 
 func TestBookingHandlerCreateBooking(t *testing.T) {
@@ -949,6 +965,101 @@ func TestBookingHandlerCancelBookingRejectsUnauthenticatedRequest(t *testing.T) 
 	}
 }
 
+func TestBookingHandlerListsBookingStatusHistory(t *testing.T) {
+	service := &fakeBookingCreator{
+		historyResult: []sqlc.BookingStatusHistory{
+			bookingStatusHistoryTestModel(1, 88, "confirmed"),
+			bookingStatusHistoryTestModel(2, 88, "cancelled"),
+		},
+	}
+	mux, token := newAuthenticatedBookingMux(t, service, 42)
+
+	recorder := performBookingGET(mux, token, "/me/bookings/88/history")
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body = %s", recorder.Code, http.StatusOK, recorder.Body.String())
+	}
+	if !strings.HasPrefix(recorder.Header().Get("Content-Type"), "application/json") {
+		t.Errorf("Content-Type = %q, want application/json", recorder.Header().Get("Content-Type"))
+	}
+	if !service.historyCalled {
+		t.Fatal("booking history service was not called")
+	}
+	if service.historyBookingID != 88 || service.historyUserID != 42 {
+		t.Errorf("service IDs = booking %d, user %d; want booking 88, user 42", service.historyBookingID, service.historyUserID)
+	}
+
+	var response []struct {
+		ID        int64  `json:"id"`
+		BookingID int64  `json:"booking_id"`
+		ToStatus  string `json:"to_status"`
+	}
+	if err := json.NewDecoder(recorder.Body).Decode(&response); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if len(response) != 2 || response[0].ToStatus != "confirmed" || response[1].ToStatus != "cancelled" {
+		t.Errorf("response = %+v, want confirmed then cancelled", response)
+	}
+}
+
+func TestBookingHandlerBookingStatusHistoryMapsServiceErrors(t *testing.T) {
+	tests := []struct {
+		name       string
+		err        error
+		wantStatus int
+	}{
+		{name: "booking not found", err: booking.ErrBookingNotFound, wantStatus: http.StatusNotFound},
+		{name: "unexpected error", err: errors.New("database unavailable"), wantStatus: http.StatusInternalServerError},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			service := &fakeBookingCreator{historyErr: tt.err}
+			mux, token := newAuthenticatedBookingMux(t, service, 42)
+
+			recorder := performBookingGET(mux, token, "/me/bookings/88/history")
+
+			if recorder.Code != tt.wantStatus {
+				t.Fatalf("status = %d, want %d; body = %s", recorder.Code, tt.wantStatus, recorder.Body.String())
+			}
+			if !service.historyCalled {
+				t.Fatal("booking history service was not called")
+			}
+		})
+	}
+}
+
+func TestBookingHandlerBookingStatusHistoryRejectsInvalidID(t *testing.T) {
+	service := &fakeBookingCreator{}
+	mux, token := newAuthenticatedBookingMux(t, service, 42)
+
+	recorder := performBookingGET(mux, token, "/me/bookings/not-a-number/history")
+
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d; body = %s", recorder.Code, http.StatusBadRequest, recorder.Body.String())
+	}
+	if service.historyCalled {
+		t.Fatal("booking history service was called for an invalid booking ID")
+	}
+}
+
+func TestBookingHandlerBookingStatusHistoryRejectsUnauthenticatedRequest(t *testing.T) {
+	service := &fakeBookingCreator{}
+	mux, _ := newAuthenticatedBookingMux(t, service, 42)
+
+	recorder := performBookingGET(mux, "", "/me/bookings/88/history")
+
+	if recorder.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusUnauthorized)
+	}
+	if recorder.Header().Get("WWW-Authenticate") != "Bearer" {
+		t.Errorf("WWW-Authenticate = %q, want Bearer", recorder.Header().Get("WWW-Authenticate"))
+	}
+	if service.historyCalled {
+		t.Fatal("booking history service was called without authentication")
+	}
+}
+
 func newAuthenticatedBookingMux(t *testing.T, service bookingService, userID int64) (*http.ServeMux, string) {
 	t.Helper()
 
@@ -984,6 +1095,10 @@ func newAuthenticatedBookingMux(t *testing.T, service bookingService, userID int
 	mux.Handle(
 		"POST /me/bookings/{bookingID}/cancel",
 		authMiddleware.Authenticate(http.HandlerFunc(bookingHandler.CancelBooking)),
+	)
+	mux.Handle(
+		"GET /me/bookings/{bookingID}/history",
+		authMiddleware.Authenticate(http.HandlerFunc(bookingHandler.ListBookingStatusHistoryForUser)),
 	)
 	mux.HandleFunc(
 		"GET /hotels/{hotelID}/available-room-types",
@@ -1069,5 +1184,21 @@ func bookingTestModel(id, userID, roomTypeID int64, status string) sqlc.Booking 
 		Status:        status,
 		CreatedAt:     pgtype.Timestamptz{Time: time.Date(2026, time.September, 1, 10, 0, 0, 0, time.UTC), Valid: true},
 		UpdatedAt:     pgtype.Timestamptz{Time: time.Date(2026, time.September, 1, 10, 0, 0, 0, time.UTC), Valid: true},
+	}
+}
+
+func bookingStatusHistoryTestModel(id, bookingID int64, toStatus string) sqlc.BookingStatusHistory {
+	fromStatus := pgtype.Text{}
+	if toStatus != "confirmed" {
+		fromStatus = pgtype.Text{String: "confirmed", Valid: true}
+	}
+	return sqlc.BookingStatusHistory{
+		ID:              id,
+		BookingID:       bookingID,
+		FromStatus:      fromStatus,
+		ToStatus:        toStatus,
+		ChangedByUserID: pgtype.Int8{Int64: 42, Valid: true},
+		Reason:          pgtype.Text{String: "status changed", Valid: true},
+		CreatedAt:       pgtype.Timestamptz{Time: time.Date(2030, time.January, int(id), 10, 0, 0, 0, time.UTC), Valid: true},
 	}
 }

@@ -10,11 +10,13 @@ import (
 
 	"github.com/khangtran2403/ryoko/internal/admin_booking"
 	"github.com/khangtran2403/ryoko/internal/auth"
+	"github.com/khangtran2403/ryoko/internal/db/sqlc"
 	"github.com/khangtran2403/ryoko/internal/middleware"
 )
 
 type adminBookingService interface {
 	ListBookingsForAdmin(ctx context.Context, input admin_booking.ListBookingsForAdminInput) (admin_booking.ListBookingsForAdminResult, error)
+	ListBookingHistoryForAdmin(ctx context.Context, bookingID int64) ([]sqlc.BookingStatusHistory, error)
 }
 
 type AdminBookingHandler struct {
@@ -117,4 +119,34 @@ func (h *AdminBookingHandler) ListBookingsForAdmin(w http.ResponseWriter, r *htt
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	json.NewEncoder(w).Encode(response)
+}
+func (h *AdminBookingHandler) ListBookingHistoryForAdmin(w http.ResponseWriter, r *http.Request) {
+	bookingIDStr := r.PathValue("bookingID")
+	bookingID, err := strconv.ParseInt(bookingIDStr, 10, 64)
+	if err != nil || bookingID <= 0 {
+		http.Error(w, "invalid booking ID", http.StatusBadRequest)
+		return
+	}
+	principal, ok := middleware.PrincipalFromContext(r.Context())
+	if !ok {
+		w.Header().Set("WWW-Authenticate", "Bearer")
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+	if principal.Role != auth.RoleAdmin {
+		http.Error(w, "Forbidden", http.StatusForbidden)
+		return
+	}
+	history, err := h.adminBookingService.ListBookingHistoryForAdmin(r.Context(), bookingID)
+	if errors.Is(err, admin_booking.ErrBookingNotFound) {
+		http.Error(w, "Booking not found", http.StatusNotFound)
+		return
+	}
+	if err != nil {
+		http.Error(w, "Failed to list booking status history", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(history)
 }

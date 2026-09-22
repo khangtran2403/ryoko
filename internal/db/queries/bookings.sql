@@ -116,6 +116,22 @@ SELECT
 FROM bookings
 WHERE id = sqlc.arg(booking_id)
 AND user_id = sqlc.arg(user_id);
+-- name: GetBookingByIDForAdmin :one
+SELECT
+    id,
+    user_id,
+    room_type_id,
+    check_in,
+    check_out,
+    rooms_count,
+    guest_count,
+    price_per_night,
+    total_price,
+    status,
+    created_at,
+    updated_at
+FROM bookings
+WHERE id = sqlc.arg(booking_id);
 -- name: GetBookingForCancellation :one
 SELECT
     id,
@@ -162,10 +178,196 @@ RETURNING
     status,
     created_at,
     updated_at;
--- name: CompletePastBookings :execrows
+-- name: CompletePastBookings :one
+WITH completed_bookings AS (
+    UPDATE bookings
+    SET
+        status = 'completed',
+        updated_at = now()
+    WHERE status = 'confirmed'
+      AND check_out <= sqlc.arg(today)::date
+    RETURNING
+        id,
+        updated_at
+),
+recorded_history AS (
+    INSERT INTO booking_status_history (
+        booking_id,
+        from_status,
+        to_status,
+        changed_by_user_id,
+        reason,
+        created_at
+    )
+    SELECT
+        id,
+        'confirmed',
+        'completed',
+        NULL,
+        'Stay completed automatically',
+        updated_at
+    FROM completed_bookings
+    RETURNING booking_id
+)
+SELECT count(*)::bigint AS completed_count
+FROM recorded_history;
+-- name: ClaimBookingIdempotencyKey :execrows
+INSERT INTO booking_idempotency_keys (
+    user_id,
+    idempotency_key,
+    request_hash
+)
+VALUES (
+    sqlc.arg(user_id),
+    sqlc.arg(idempotency_key),
+    sqlc.arg(request_hash)
+)
+ON CONFLICT (user_id, idempotency_key)
+DO NOTHING;
+-- name: GetBookingIdempotencyKey :one
+SELECT
+    request_hash,
+    booking_id
+FROM booking_idempotency_keys
+WHERE user_id = sqlc.arg(user_id)
+  AND idempotency_key = sqlc.arg(idempotency_key);
+-- name: AttachBookingToIdempotencyKey :execrows
+UPDATE booking_idempotency_keys
+SET booking_id = sqlc.arg(booking_id)
+WHERE user_id = sqlc.arg(user_id)
+  AND idempotency_key = sqlc.arg(idempotency_key)
+  AND request_hash = sqlc.arg(request_hash)
+  AND booking_id IS NULL;
+-- name: ListBookingsForAdmin :many
+SELECT
+    b.id AS booking_id,
+    b.user_id,
+    u.full_name AS customer_name,
+    u.email AS customer_email,
+    b.room_type_id,
+    rt.name AS room_type_name,
+    h.id AS hotel_id,
+    h.name AS hotel_name,
+    b.check_in,
+    b.check_out,
+    (b.check_out - b.check_in)::int AS number_of_nights,
+    b.rooms_count,
+    b.guest_count,
+    b.price_per_night,
+    b.total_price,
+    b.status,
+    b.created_at,
+    b.updated_at
+FROM bookings AS b
+JOIN users AS u
+    ON u.id = b.user_id
+JOIN room_types AS rt
+    ON rt.id = b.room_type_id
+JOIN hotels AS h
+    ON h.id = rt.hotel_id
+WHERE (
+    sqlc.narg(hotel_id)::bigint IS NULL
+    OR h.id = sqlc.narg(hotel_id)::bigint
+)
+AND (
+    sqlc.narg(status)::text IS NULL
+    OR b.status = sqlc.narg(status)::text
+)
+AND (
+    sqlc.narg(check_in_from)::date IS NULL
+    OR b.check_in >= sqlc.narg(check_in_from)::date
+)
+AND (
+    sqlc.narg(check_in_to)::date IS NULL
+    OR b.check_in <= sqlc.narg(check_in_to)::date
+)
+ORDER BY b.created_at DESC, b.id DESC
+LIMIT sqlc.arg(result_limit)::bigint
+OFFSET sqlc.arg(result_offset)::bigint;
+-- name: CreateBookingStatusHistory :one
+INSERT INTO booking_status_history (
+    booking_id,
+    from_status,
+    to_status,
+    changed_by_user_id,
+    reason
+)
+VALUES (
+    sqlc.arg(booking_id),
+    sqlc.narg(from_status)::text,
+    sqlc.arg(to_status),
+    sqlc.narg(changed_by_user_id)::bigint,
+    sqlc.narg(reason)::text
+)
+RETURNING
+    id,
+    booking_id,
+    from_status,
+    to_status,
+    changed_by_user_id,
+    reason,
+    created_at;
+-- name: ListBookingStatusHistoryForUser :many
+SELECT
+    bsh.id,
+    bsh.booking_id,
+    bsh.from_status,
+    bsh.to_status,
+    bsh.changed_by_user_id,
+    bsh.reason,
+    bsh.created_at
+FROM booking_status_history AS bsh
+JOIN bookings AS b
+    ON b.id = bsh.booking_id
+WHERE bsh.booking_id = sqlc.arg(booking_id)
+  AND b.user_id = sqlc.arg(user_id)
+ORDER BY bsh.created_at ASC, bsh.id ASC;
+-- name: ListBookingStatusHistoryForAdmin :many
+SELECT
+    id,
+    booking_id,
+    from_status,
+    to_status,
+    changed_by_user_id,
+    reason,
+    created_at
+FROM booking_status_history
+WHERE booking_id = sqlc.arg(booking_id)
+ORDER BY created_at ASC, id ASC;
+-- name: GetBookingForAdminCancellation :one
+SELECT
+    id,
+    user_id,
+    room_type_id,
+    check_in,
+    check_out,
+    rooms_count,
+    guest_count,
+    price_per_night,
+    total_price,
+    status,
+    created_at,
+    updated_at
+FROM bookings
+WHERE id = sqlc.arg(booking_id)
+FOR UPDATE;
+-- name: CancelBookingForAdmin :one
 UPDATE bookings
 SET
-    status = 'completed',
+    status = 'cancelled',
     updated_at = now()
-WHERE status = 'confirmed'
-  AND check_out <= sqlc.arg(today)::date;
+WHERE id = sqlc.arg(booking_id)
+  AND status = 'confirmed'
+RETURNING
+    id,
+    user_id,
+    room_type_id,
+    check_in,
+    check_out,
+    rooms_count,
+    guest_count,
+    price_per_night,
+    total_price,
+    status,
+    created_at,
+    updated_at;

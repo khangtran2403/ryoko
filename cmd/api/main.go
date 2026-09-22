@@ -102,6 +102,8 @@ func main() {
 	mux.HandleFunc("GET /hotels/{hotelID}/amenities", amenityHandler.ListAmenitiesByHotel)
 	mux.Handle("DELETE /hotels/{hotelID}/amenities/{amenityID}", adminOnly(amenityHandler.RemoveAmenitiesFromHotel))
 	mux.Handle("GET /admin/bookings", adminOnly(adminBookingHandler.ListBookingsForAdmin))
+	mux.Handle("GET /me/bookings/{bookingID}/history", authMiddleware.Authenticate(http.HandlerFunc(bookingHandler.ListBookingStatusHistoryForUser)))
+	mux.Handle("GET /admin/bookings/{bookingID}/history", adminOnly(adminBookingHandler.ListBookingHistoryForAdmin))
 	mux.Handle(
 		"GET /me",
 		authMiddleware.Authenticate(

@@ -21,6 +21,7 @@ type bookingService interface {
 	CancelBooking(ctx context.Context, bookingID int64, userID int64) (sqlc.Booking, error)
 	ListAvailableRoomTypes(ctx context.Context, input booking.AvailabilityInput) ([]sqlc.ListAvailableRoomTypesRow, error)
 	SearchAvailableHotels(ctx context.Context, input booking.HotelSearchInput) (booking.HotelSearchResult, error)
+	ListBookingsHistoryByUser(ctx context.Context, bookingID int64, userID int64) ([]sqlc.BookingStatusHistory, error)
 }
 
 type BookingHandler struct {
@@ -102,7 +103,8 @@ func (h *BookingHandler) CreateBooking(w http.ResponseWriter, r *http.Request) {
 
 	case errors.Is(err, booking.ErrRoomTypeNotFound):
 		http.Error(w, "Room type not found", http.StatusNotFound)
-
+	case errors.Is(err, booking.ErrBookingStatusHistoryNotFound):
+		http.Error(w, "Booking status history not found", http.StatusNotFound)
 	case errors.Is(err, booking.ErrUnavailable):
 		http.Error(w, "Requested rooms are unavailable", http.StatusConflict)
 	case errors.Is(err, booking.ErrIdempotencyKeyConflict):
@@ -212,6 +214,36 @@ func (h *BookingHandler) ListBookingsByUser(w http.ResponseWriter, r *http.Reque
 	w.WriteHeader(http.StatusOK)
 	json.NewEncoder(w).Encode(response)
 }
+func (h *BookingHandler) ListBookingStatusHistoryForUser(w http.ResponseWriter, r *http.Request) {
+	bookingID := r.PathValue("bookingID")
+	if bookingID == "" {
+		http.Error(w, "booking ID is required", http.StatusBadRequest)
+		return
+	}
+	convBookingID, err := strconv.ParseInt(bookingID, 10, 64)
+	if err != nil {
+		http.Error(w, "Invalid booking ID", http.StatusBadRequest)
+		return
+	}
+	principal, ok := middleware.PrincipalFromContext(r.Context())
+	if !ok {
+		w.Header().Set("WWW-Authenticate", "Bearer")
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+	history, err := h.service.ListBookingsHistoryByUser(r.Context(), convBookingID, principal.UserID)
+	if errors.Is(err, booking.ErrBookingNotFound) {
+		http.Error(w, "Booking not found", http.StatusNotFound)
+		return
+	}
+	if err != nil {
+		http.Error(w, "Failed to list booking status history", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(history)
+}
 func (h *BookingHandler) CancelBooking(w http.ResponseWriter, r *http.Request) {
 	getID := r.PathValue("bookingID")
 	if getID == "" {
@@ -233,6 +265,9 @@ func (h *BookingHandler) CancelBooking(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case errors.Is(err, booking.ErrBookingNotFound):
 		http.Error(w, "Booking not found", http.StatusNotFound)
+		return
+	case errors.Is(err, booking.ErrBookingStatusHistoryNotFound):
+		http.Error(w, "Booking status history not found", http.StatusNotFound)
 		return
 	case errors.Is(err, booking.ErrBookingNotCancellable):
 		http.Error(w, "Booking cannot be cancelled", http.StatusConflict)
