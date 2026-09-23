@@ -10,6 +10,7 @@ import (
 
 	"github.com/khangtran2403/ryoko/internal/admin_booking"
 	"github.com/khangtran2403/ryoko/internal/auth"
+	"github.com/khangtran2403/ryoko/internal/booking"
 	"github.com/khangtran2403/ryoko/internal/db/sqlc"
 	"github.com/khangtran2403/ryoko/internal/middleware"
 )
@@ -18,14 +19,21 @@ type adminBookingService interface {
 	ListBookingsForAdmin(ctx context.Context, input admin_booking.ListBookingsForAdminInput) (admin_booking.ListBookingsForAdminResult, error)
 	ListBookingHistoryForAdmin(ctx context.Context, bookingID int64) ([]sqlc.BookingStatusHistory, error)
 }
-
+type adminBookingCancellationService interface {
+	CancelBookingAsAdmin(ctx context.Context, input booking.AdminCancellationInput) (sqlc.Booking, error)
+}
+type AdminCancelBookingRequest struct {
+	Reason string `json:"reason"`
+}
 type AdminBookingHandler struct {
-	adminBookingService adminBookingService
+	adminBookingService             adminBookingService
+	adminBookingCancellationService adminBookingCancellationService
 }
 
-func NewAdminBookingHandler(adminBookingService adminBookingService) *AdminBookingHandler {
+func NewAdminBookingHandler(adminBookingService adminBookingService, adminBookingCancellationService adminBookingCancellationService) *AdminBookingHandler {
 	return &AdminBookingHandler{
-		adminBookingService: adminBookingService,
+		adminBookingService:             adminBookingService,
+		adminBookingCancellationService: adminBookingCancellationService,
 	}
 }
 
@@ -149,4 +157,65 @@ func (h *AdminBookingHandler) ListBookingHistoryForAdmin(w http.ResponseWriter, 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	json.NewEncoder(w).Encode(history)
+}
+func (h *AdminBookingHandler) AdminCancellation(w http.ResponseWriter, r *http.Request) {
+	var req AdminCancelBookingRequest
+	getbookingID := r.PathValue("bookingID")
+	if getbookingID == "" {
+		http.Error(w, "booking ID is required", http.StatusBadRequest)
+		return
+	}
+	bookingID, err := strconv.ParseInt(getbookingID, 10, 64)
+	if err != nil || bookingID <= 0 {
+		http.Error(w, "invalid booking ID", http.StatusBadRequest)
+		return
+	}
+	principal, ok := middleware.PrincipalFromContext(r.Context())
+	if !ok {
+		w.Header().Set("WWW-Authenticate", "Bearer")
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+	if principal.Role != auth.RoleAdmin {
+		http.Error(w, "Forbidden", http.StatusForbidden)
+		return
+	}
+	decoder := json.NewDecoder(r.Body)
+	decoder.DisallowUnknownFields()
+
+	if err := decoder.Decode(&req); err != nil {
+		http.Error(w, "Invalid request body", http.StatusBadRequest)
+		return
+	}
+	cancelled, err := h.adminBookingCancellationService.CancelBookingAsAdmin(
+		r.Context(),
+		booking.AdminCancellationInput{
+			BookingID: bookingID,
+			AdminID:   principal.UserID,
+			Reason:    req.Reason,
+		},
+	)
+	switch {
+	case errors.Is(err, booking.ErrInvalidCancellationReason):
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	case errors.Is(err, booking.ErrBookingNotFound):
+		http.Error(w, "Booking not found", http.StatusNotFound)
+		return
+	case errors.Is(err, booking.ErrBookingNotCancellable):
+		http.Error(w, "Booking cannot be canceled", http.StatusConflict)
+		return
+	case err != nil:
+		http.Error(w, "Failed to cancel booking", http.StatusInternalServerError)
+		return
+	default:
+		response, err := bookingResponseFromModel(cancelled)
+		if err != nil {
+			http.Error(w, "Failed to format bookings", http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		json.NewEncoder(w).Encode(response)
+	}
 }

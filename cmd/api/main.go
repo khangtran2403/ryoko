@@ -67,7 +67,7 @@ func main() {
 		log.Default(),
 	)
 	bookingHandler := handler.NewBookingHandler(bookingService)
-	adminBookingHandler := handler.NewAdminBookingHandler(newAdminBookingService)
+	adminBookingHandler := handler.NewAdminBookingHandler(newAdminBookingService, bookingService)
 	reviewService := review.NewService(queries)
 	reviewHandler := handler.NewReviewHandler(reviewService)
 	hotelImageService := hotelimages.NewService(pool, queries)
@@ -104,6 +104,7 @@ func main() {
 	mux.Handle("GET /admin/bookings", adminOnly(adminBookingHandler.ListBookingsForAdmin))
 	mux.Handle("GET /me/bookings/{bookingID}/history", authMiddleware.Authenticate(http.HandlerFunc(bookingHandler.ListBookingStatusHistoryForUser)))
 	mux.Handle("GET /admin/bookings/{bookingID}/history", adminOnly(adminBookingHandler.ListBookingHistoryForAdmin))
+	mux.Handle("POST /admin/bookings/{bookingID}/cancel", adminOnly(adminBookingHandler.AdminCancellation))
 	mux.Handle(
 		"GET /me",
 		authMiddleware.Authenticate(

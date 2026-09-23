@@ -302,6 +302,66 @@ func TestCancelBookingRestoresAvailabilityExactlyOnce(t *testing.T) {
 	assertAvailabilityRange(t, pool, roomTypeID, 3, 0, 0)
 }
 
+func TestAdminCancellationRestoresAvailabilityAndRecordsAuditActor(t *testing.T) {
+	pool, service := newBookingIntegrationService(t)
+	userID, roomTypeID := insertBookingFixtures(t, pool, 2)
+	ctx := context.Background()
+
+	var adminID int64
+	if err := pool.QueryRow(
+		ctx,
+		`INSERT INTO users (email, full_name, role)
+		 VALUES ('admin-cancellation@example.com', 'Cancellation Admin', 'admin')
+		 RETURNING id`,
+	).Scan(&adminID); err != nil {
+		t.Fatalf("insert admin user: %v", err)
+	}
+
+	created, err := service.CreateBooking(ctx, futureBookingInput(userID, roomTypeID, 1))
+	if err != nil {
+		t.Fatalf("CreateBooking() error = %v", err)
+	}
+	assertAvailabilityRange(t, pool, roomTypeID, 3, 1, 1)
+
+	cancelled, err := service.CancelBookingAsAdmin(ctx, AdminCancellationInput{
+		BookingID: created.ID,
+		AdminID:   adminID,
+		Reason:    "  Emergency maintenance  ",
+	})
+	if err != nil {
+		t.Fatalf("CancelBookingAsAdmin() error = %v", err)
+	}
+	if cancelled.Status != "cancelled" {
+		t.Errorf("cancelled status = %q, want cancelled", cancelled.Status)
+	}
+	assertAvailabilityRange(t, pool, roomTypeID, 3, 0, 0)
+
+	var fromStatus string
+	var toStatus string
+	var changedByUserID int64
+	var reason string
+	if err := pool.QueryRow(
+		ctx,
+		`SELECT from_status, to_status, changed_by_user_id, reason
+		 FROM booking_status_history
+		 WHERE booking_id = $1
+		 ORDER BY created_at DESC, id DESC
+		 LIMIT 1`,
+		created.ID,
+	).Scan(&fromStatus, &toStatus, &changedByUserID, &reason); err != nil {
+		t.Fatalf("query cancellation history: %v", err)
+	}
+	if fromStatus != "confirmed" || toStatus != "cancelled" {
+		t.Errorf("history transition = %q -> %q, want confirmed -> cancelled", fromStatus, toStatus)
+	}
+	if changedByUserID != adminID {
+		t.Errorf("history actor = %d, want admin %d", changedByUserID, adminID)
+	}
+	if reason != "Emergency maintenance" {
+		t.Errorf("history reason = %q, want trimmed reason", reason)
+	}
+}
+
 func TestCancelBookingPreventsConcurrentDoubleCancellation(t *testing.T) {
 	pool, service := newBookingIntegrationService(t)
 	userID, roomTypeID := insertBookingFixtures(t, pool, 2)

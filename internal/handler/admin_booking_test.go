@@ -13,6 +13,7 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/khangtran2403/ryoko/internal/admin_booking"
 	"github.com/khangtran2403/ryoko/internal/auth"
+	"github.com/khangtran2403/ryoko/internal/booking"
 	"github.com/khangtran2403/ryoko/internal/db/sqlc"
 	"github.com/khangtran2403/ryoko/internal/middleware"
 )
@@ -26,6 +27,10 @@ type fakeAdminBookingService struct {
 	historyBookingID int64
 	historyResult    []sqlc.BookingStatusHistory
 	historyErr       error
+	cancelCalled     bool
+	cancelInput      booking.AdminCancellationInput
+	cancelResult     sqlc.Booking
+	cancelErr        error
 }
 
 func (f *fakeAdminBookingService) ListBookingsForAdmin(
@@ -44,6 +49,15 @@ func (f *fakeAdminBookingService) ListBookingHistoryForAdmin(
 	f.historyCalled = true
 	f.historyBookingID = bookingID
 	return f.historyResult, f.historyErr
+}
+
+func (f *fakeAdminBookingService) CancelBookingAsAdmin(
+	_ context.Context,
+	input booking.AdminCancellationInput,
+) (sqlc.Booking, error) {
+	f.cancelCalled = true
+	f.cancelInput = input
+	return f.cancelResult, f.cancelErr
 }
 
 func TestAdminBookingHandlerListsFilteredBookings(t *testing.T) {
@@ -356,9 +370,136 @@ func TestAdminBookingHistoryRouteRequiresAdmin(t *testing.T) {
 	}
 }
 
+func TestAdminBookingHandlerCancelsBooking(t *testing.T) {
+	service := &fakeAdminBookingService{
+		cancelResult: bookingTestModel(91, 42, 7, "cancelled"),
+	}
+	mux, adminToken, _ := newAdminBookingMux(t, service)
+
+	recorder := performAdminBookingCancellationRequest(
+		mux,
+		adminToken,
+		"/admin/bookings/91/cancel",
+		`{"reason":"Emergency maintenance"}`,
+	)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body = %s", recorder.Code, http.StatusOK, recorder.Body.String())
+	}
+	if !service.cancelCalled {
+		t.Fatal("admin cancellation service was not called")
+	}
+	if service.cancelInput.BookingID != 91 || service.cancelInput.AdminID != 1 || service.cancelInput.Reason != "Emergency maintenance" {
+		t.Errorf("cancellation input = %+v, want booking 91, admin 1, supplied reason", service.cancelInput)
+	}
+
+	var response BookingResponse
+	if err := json.NewDecoder(recorder.Body).Decode(&response); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if response.ID != 91 || response.Status != "cancelled" {
+		t.Errorf("response = {ID:%d Status:%q}, want {ID:91 Status:cancelled}", response.ID, response.Status)
+	}
+}
+
+func TestAdminBookingHandlerCancellationRejectsInvalidRequests(t *testing.T) {
+	tests := []struct {
+		name string
+		path string
+		body string
+	}{
+		{name: "invalid booking ID", path: "/admin/bookings/not-a-number/cancel", body: `{"reason":"Maintenance"}`},
+		{name: "missing body", path: "/admin/bookings/91/cancel", body: ""},
+		{name: "malformed JSON", path: "/admin/bookings/91/cancel", body: `{"reason":`},
+		{name: "unknown field", path: "/admin/bookings/91/cancel", body: `{"reason":"Maintenance","unexpected":true}`},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			service := &fakeAdminBookingService{}
+			mux, adminToken, _ := newAdminBookingMux(t, service)
+
+			recorder := performAdminBookingCancellationRequest(mux, adminToken, tt.path, tt.body)
+
+			if recorder.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want %d; body = %s", recorder.Code, http.StatusBadRequest, recorder.Body.String())
+			}
+			if service.cancelCalled {
+				t.Fatal("cancellation service was called for an invalid request")
+			}
+		})
+	}
+}
+
+func TestAdminBookingHandlerCancellationMapsServiceErrors(t *testing.T) {
+	tests := []struct {
+		name       string
+		err        error
+		wantStatus int
+	}{
+		{name: "invalid reason", err: booking.ErrInvalidCancellationReason, wantStatus: http.StatusBadRequest},
+		{name: "booking not found", err: booking.ErrBookingNotFound, wantStatus: http.StatusNotFound},
+		{name: "booking not cancellable", err: booking.ErrBookingNotCancellable, wantStatus: http.StatusConflict},
+		{name: "unexpected error", err: errors.New("database unavailable"), wantStatus: http.StatusInternalServerError},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			service := &fakeAdminBookingService{cancelErr: tt.err}
+			mux, adminToken, _ := newAdminBookingMux(t, service)
+
+			recorder := performAdminBookingCancellationRequest(
+				mux,
+				adminToken,
+				"/admin/bookings/91/cancel",
+				`{"reason":"Maintenance"}`,
+			)
+
+			if recorder.Code != tt.wantStatus {
+				t.Fatalf("status = %d, want %d; body = %s", recorder.Code, tt.wantStatus, recorder.Body.String())
+			}
+			if !service.cancelCalled {
+				t.Fatal("cancellation service was not called")
+			}
+		})
+	}
+}
+
+func TestAdminBookingCancellationRouteRequiresAdmin(t *testing.T) {
+	tests := []struct {
+		name       string
+		useToken   func(adminToken, customerToken string) string
+		wantStatus int
+	}{
+		{name: "missing token", useToken: func(_, _ string) string { return "" }, wantStatus: http.StatusUnauthorized},
+		{name: "customer token", useToken: func(_, customerToken string) string { return customerToken }, wantStatus: http.StatusForbidden},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			service := &fakeAdminBookingService{}
+			mux, adminToken, customerToken := newAdminBookingMux(t, service)
+
+			recorder := performAdminBookingCancellationRequest(
+				mux,
+				tt.useToken(adminToken, customerToken),
+				"/admin/bookings/91/cancel",
+				`{"reason":"Maintenance"}`,
+			)
+
+			if recorder.Code != tt.wantStatus {
+				t.Fatalf("status = %d, want %d", recorder.Code, tt.wantStatus)
+			}
+			if service.cancelCalled {
+				t.Fatal("cancellation service was called without admin authorization")
+			}
+		})
+	}
+}
+
 func newAdminBookingMux(
 	t *testing.T,
-	service adminBookingService,
+	service *fakeAdminBookingService,
 ) (*http.ServeMux, string, string) {
 	t.Helper()
 
@@ -380,7 +521,7 @@ func newAdminBookingMux(
 		t.Fatalf("generate customer token: %v", err)
 	}
 
-	handler := NewAdminBookingHandler(service)
+	handler := NewAdminBookingHandler(service, service)
 	authMiddleware := middleware.NewAuthMiddleware(tokenManager)
 	mux := http.NewServeMux()
 	mux.Handle(
@@ -395,11 +536,33 @@ func newAdminBookingMux(
 			middleware.RequireRole(auth.RoleAdmin, http.HandlerFunc(handler.ListBookingHistoryForAdmin)),
 		),
 	)
+	mux.Handle(
+		"POST /admin/bookings/{bookingID}/cancel",
+		authMiddleware.Authenticate(
+			middleware.RequireRole(auth.RoleAdmin, http.HandlerFunc(handler.AdminCancellation)),
+		),
+	)
 	return mux, adminToken, customerToken
 }
 
 func performAdminBookingRequest(handler http.Handler, token, path string) *httptest.ResponseRecorder {
 	request := httptest.NewRequest(http.MethodGet, path, nil)
+	if token != "" {
+		request.Header.Set("Authorization", "Bearer "+token)
+	}
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, request)
+	return recorder
+}
+
+func performAdminBookingCancellationRequest(
+	handler http.Handler,
+	token string,
+	path string,
+	body string,
+) *httptest.ResponseRecorder {
+	request := httptest.NewRequest(http.MethodPost, path, strings.NewReader(body))
+	request.Header.Set("Content-Type", "application/json")
 	if token != "" {
 		request.Header.Set("Authorization", "Bearer "+token)
 	}

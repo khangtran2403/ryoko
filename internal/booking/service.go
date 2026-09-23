@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
@@ -16,34 +17,37 @@ import (
 )
 
 var (
-	ErrInvalidDates           = errors.New("invalid booking dates")
-	ErrInvalidRooms           = errors.New("invalid room count")
-	ErrInvalidGuests          = errors.New("invalid guest count")
-	ErrRoomTypeNotFound       = errors.New("room type not found")
-	ErrCapacityExceeded       = errors.New("room capacity exceeded")
-	ErrUnavailable            = errors.New("rooms unavailable")
-	ErrInvalidUser            = errors.New("invalid user")
-	ErrBookingNotFound        = errors.New("booking not found")
-	ErrBookingNotCancellable  = errors.New("booking cannot be cancelled")
-	ErrInvalidHotelID         = errors.New("hotel ID must be positive")
-	ErrCheckInInPast          = errors.New("check-in date cannot be in the past")
-	ErrInvalidCity            = errors.New("city must not be empty")
-	ErrInvalidPage            = errors.New("page must be a positive integer")
-	ErrInvalidPageSize        = errors.New("page_size must be between 1 and 100")
-	ErrInvalidSort            = errors.New("sort must be price_asc or price_desc")
-	ErrIdempotencyKeyConflict = errors.New("idempotency key hash conflict")
-	ErrInvalidIdempotencyKey  = errors.New("idempotency key is missing or invalid")
+	ErrInvalidDates                 = errors.New("invalid booking dates")
+	ErrInvalidRooms                 = errors.New("invalid room count")
+	ErrInvalidGuests                = errors.New("invalid guest count")
+	ErrRoomTypeNotFound             = errors.New("room type not found")
+	ErrCapacityExceeded             = errors.New("room capacity exceeded")
+	ErrUnavailable                  = errors.New("rooms unavailable")
+	ErrInvalidUser                  = errors.New("invalid user")
+	ErrBookingNotFound              = errors.New("booking not found")
+	ErrBookingNotCancellable        = errors.New("booking cannot be cancelled")
+	ErrInvalidHotelID               = errors.New("hotel ID must be positive")
+	ErrCheckInInPast                = errors.New("check-in date cannot be in the past")
+	ErrInvalidCity                  = errors.New("city must not be empty")
+	ErrInvalidPage                  = errors.New("page must be a positive integer")
+	ErrInvalidPageSize              = errors.New("page_size must be between 1 and 100")
+	ErrInvalidSort                  = errors.New("sort must be price_asc or price_desc")
+	ErrIdempotencyKeyConflict       = errors.New("idempotency key hash conflict")
+	ErrInvalidIdempotencyKey        = errors.New("idempotency key is missing or invalid")
+	ErrBookingStatusHistoryNotFound = errors.New("booking status history not found")
+	ErrInvalidCancellationReason    = errors.New("cancellation reason must be between 1 and 500 characters")
 )
 
 const (
-	DefaultHotelSearchPage     int32  = 1
-	DefaultHotelSearchPageSize int32  = 20
-	MaxHotelSearchPageSize     int32  = 100
-	HotelSearchSortPriceAsc    string = "price_asc"
-	HotelSearchSortPriceDesc   string = "price_desc"
-	DefaultBookingPage         int32  = 1
-	DefaultBookingPageSize     int32  = 20
-	MaxBookingPageSize         int32  = 100
+	DefaultHotelSearchPage      int32  = 1
+	DefaultHotelSearchPageSize  int32  = 20
+	MaxHotelSearchPageSize      int32  = 100
+	HotelSearchSortPriceAsc     string = "price_asc"
+	HotelSearchSortPriceDesc    string = "price_desc"
+	DefaultBookingPage          int32  = 1
+	DefaultBookingPageSize      int32  = 20
+	MaxBookingPageSize          int32  = 100
+	MaxCancellationReasonLength        = 500
 )
 
 type CreateInput struct {
@@ -98,6 +102,18 @@ type BookingPagination struct {
 type ListBookingsResult struct {
 	Bookings   []sqlc.Booking    `json:"bookings"`
 	Pagination BookingPagination `json:"pagination"`
+}
+type AdminCancellationInput struct {
+	BookingID int64
+	AdminID   int64
+	Reason    string
+}
+
+type cancellationInput struct {
+	bookingID int64
+	actorID   int64
+	ownerID   *int64
+	reason    string
 }
 type Service struct {
 	pool    *pgxpool.Pool
@@ -285,6 +301,19 @@ func (s *Service) CreateBooking(ctx context.Context, input CreateInput) (sqlc.Bo
 			return sqlc.Booking{}, fmt.Errorf("failed to attach booking to idempotency key")
 		}
 	}
+	_, err = qtx.CreateBookingStatusHistory(ctx, sqlc.CreateBookingStatusHistoryParams{
+		BookingID:       createBooking.ID,
+		FromStatus:      pgtype.Text{},
+		ToStatus:        "confirmed",
+		ChangedByUserID: pgtype.Int8{Int64: input.UserID, Valid: true},
+		Reason:          pgtype.Text{String: "Booking created", Valid: true},
+	})
+	if errors.Is(err, pgx.ErrNoRows) {
+		return sqlc.Booking{}, ErrBookingStatusHistoryNotFound
+	}
+	if err != nil {
+		return sqlc.Booking{}, fmt.Errorf("create booking status history: %w", err)
+	}
 	if err := tx.Commit(ctx); err != nil {
 		return sqlc.Booking{}, fmt.Errorf(
 			"commit booking transaction: %w",
@@ -355,12 +384,37 @@ func (s *Service) ListBookingsByUser(
 		},
 	}, nil
 }
-
-func (s *Service) CancelBooking(ctx context.Context, bookingID int64, userID int64) (sqlc.Booking, error) {
+func (s *Service) ListBookingsHistoryByUser(ctx context.Context, bookingID int64, userID int64) ([]sqlc.BookingStatusHistory, error) {
 	if bookingID <= 0 {
-		return sqlc.Booking{}, ErrBookingNotFound
+		return nil, ErrBookingNotFound
 	}
 	if userID <= 0 {
+		return nil, ErrInvalidUser
+	}
+	getBooking, err := s.queries.GetBookingByIDForUser(ctx, sqlc.GetBookingByIDForUserParams{
+		BookingID: bookingID,
+		UserID:    userID,
+	})
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrBookingNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("get booking: %w", err)
+	}
+	history, err := s.queries.ListBookingStatusHistoryForUser(ctx, sqlc.ListBookingStatusHistoryForUserParams{
+		BookingID: getBooking.ID,
+		UserID:    getBooking.UserID,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("list booking history: %w", err)
+	}
+	return history, nil
+}
+func (s *Service) cancelBooking(ctx context.Context, input cancellationInput) (sqlc.Booking, error) {
+	if input.bookingID <= 0 {
+		return sqlc.Booking{}, ErrBookingNotFound
+	}
+	if input.actorID <= 0 {
 		return sqlc.Booking{}, ErrInvalidUser
 	}
 	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{
@@ -372,11 +426,17 @@ func (s *Service) CancelBooking(ctx context.Context, bookingID int64, userID int
 	defer tx.Rollback(ctx)
 
 	qtx := s.queries.WithTx(tx)
+	var lockBooking sqlc.Booking
+	if input.ownerID != nil {
+		lockBooking, err = qtx.GetBookingForCancellation(ctx, sqlc.GetBookingForCancellationParams{
+			BookingID: input.bookingID,
+			UserID:    *input.ownerID,
+		})
+	} else {
+		lockBooking, err = qtx.GetBookingForAdminCancellation(ctx, input.bookingID)
 
-	lockBooking, err := qtx.GetBookingForCancellation(ctx, sqlc.GetBookingForCancellationParams{
-		BookingID: bookingID,
-		UserID:    userID,
-	})
+	}
+
 	if errors.Is(err, pgx.ErrNoRows) {
 		return sqlc.Booking{}, ErrBookingNotFound
 	}
@@ -434,15 +494,33 @@ func (s *Service) CancelBooking(ctx context.Context, bookingID int64, userID int
 	if affected != int64(nights) {
 		return sqlc.Booking{}, ErrUnavailable
 	}
-	cancel, err := qtx.CancelBooking(ctx, sqlc.CancelBookingParams{
-		BookingID: bookingID,
-		UserID:    userID,
-	})
+	var cancel sqlc.Booking
+	if input.ownerID != nil {
+		cancel, err = qtx.CancelBooking(ctx, sqlc.CancelBookingParams{
+			BookingID: input.bookingID,
+			UserID:    *input.ownerID,
+		})
+	} else {
+		cancel, err = qtx.CancelBookingForAdmin(ctx, input.bookingID)
+	}
 	if errors.Is(err, pgx.ErrNoRows) {
 		return sqlc.Booking{}, ErrBookingNotCancellable
 	}
 	if err != nil {
 		return sqlc.Booking{}, fmt.Errorf("cancel booking: %w", err)
+	}
+	_, err = qtx.CreateBookingStatusHistory(ctx, sqlc.CreateBookingStatusHistoryParams{
+		BookingID:       cancel.ID,
+		FromStatus:      pgtype.Text{String: "confirmed", Valid: true},
+		ToStatus:        "cancelled",
+		ChangedByUserID: pgtype.Int8{Int64: input.actorID, Valid: true},
+		Reason:          pgtype.Text{String: input.reason, Valid: true},
+	})
+	if errors.Is(err, pgx.ErrNoRows) {
+		return sqlc.Booking{}, ErrBookingStatusHistoryNotFound
+	}
+	if err != nil {
+		return sqlc.Booking{}, fmt.Errorf("create booking status history: %w", err)
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return sqlc.Booking{}, fmt.Errorf(
@@ -473,7 +551,41 @@ func (s *Service) CompletePastBookings(ctx context.Context, now time.Time) (int6
 
 	return affected, nil
 }
+func (s *Service) CancelBooking(ctx context.Context, bookingID int64, userID int64) (sqlc.Booking, error) {
+	if bookingID <= 0 {
+		return sqlc.Booking{}, ErrBookingNotFound
+	}
+	if userID <= 0 {
+		return sqlc.Booking{}, ErrInvalidUser
+	}
 
+	return s.cancelBooking(ctx, cancellationInput{
+		bookingID: bookingID,
+		actorID:   userID,
+		ownerID:   &userID,
+		reason:    "Booking cancelled by user",
+	})
+}
+func (s *Service) CancelBookingAsAdmin(ctx context.Context, input AdminCancellationInput) (sqlc.Booking, error) {
+	if input.BookingID <= 0 {
+		return sqlc.Booking{}, ErrBookingNotFound
+	}
+	if input.AdminID <= 0 {
+		return sqlc.Booking{}, ErrInvalidUser
+	}
+
+	reason := strings.TrimSpace(input.Reason)
+	if reason == "" || utf8.RuneCountInString(reason) > MaxCancellationReasonLength {
+		return sqlc.Booking{}, ErrInvalidCancellationReason
+	}
+
+	return s.cancelBooking(ctx, cancellationInput{
+		bookingID: input.BookingID,
+		actorID:   input.AdminID,
+		ownerID:   nil,
+		reason:    reason,
+	})
+}
 func (s *Service) ListAvailableRoomTypes(ctx context.Context, input AvailabilityInput) ([]sqlc.ListAvailableRoomTypesRow, error) {
 	if input.HotelID <= 0 {
 		return nil, ErrInvalidHotelID

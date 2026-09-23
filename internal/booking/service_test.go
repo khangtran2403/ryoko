@@ -3,9 +3,50 @@ package booking
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 )
+
+func TestCancelBookingAsAdminValidatesInputBeforeStartingTransaction(t *testing.T) {
+	service := NewService(nil, nil)
+
+	tests := []struct {
+		name    string
+		input   AdminCancellationInput
+		wantErr error
+	}{
+		{
+			name:    "invalid booking ID",
+			input:   AdminCancellationInput{BookingID: 0, AdminID: 1, Reason: "Maintenance"},
+			wantErr: ErrBookingNotFound,
+		},
+		{
+			name:    "invalid admin ID",
+			input:   AdminCancellationInput{BookingID: 1, AdminID: 0, Reason: "Maintenance"},
+			wantErr: ErrInvalidUser,
+		},
+		{
+			name:    "blank reason",
+			input:   AdminCancellationInput{BookingID: 1, AdminID: 1, Reason: "   "},
+			wantErr: ErrInvalidCancellationReason,
+		},
+		{
+			name:    "reason over 500 Unicode characters",
+			input:   AdminCancellationInput{BookingID: 1, AdminID: 1, Reason: strings.Repeat("đ", MaxCancellationReasonLength+1)},
+			wantErr: ErrInvalidCancellationReason,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := service.CancelBookingAsAdmin(context.Background(), tt.input)
+			if !errors.Is(err, tt.wantErr) {
+				t.Fatalf("CancelBookingAsAdmin() error = %v, want %v", err, tt.wantErr)
+			}
+		})
+	}
+}
 
 func TestCreateBookingValidatesInputBeforeStartingTransaction(t *testing.T) {
 	valid := CreateInput{
