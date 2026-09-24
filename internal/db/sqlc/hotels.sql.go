@@ -121,11 +121,11 @@ WITH available_room_types AS (
        AND rta.date < $5::date
     GROUP BY rt.id
     HAVING
-        rt.total_rooms - COALESCE(MAX(rta.rooms_booked), 0)
-            >= $6::int
-        AND rt.capacity::bigint
-            * $6::int
-            >= $7::int
+    rt.total_rooms
+        - COALESCE(MAX(rta.rooms_booked + rta.rooms_blocked), 0)
+        >= $6::int
+    AND rt.capacity * $6::int
+        >= $7::int
 ),
 matching_hotels AS (
     SELECT

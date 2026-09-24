@@ -29,6 +29,24 @@ type Booking struct {
 	UpdatedAt     pgtype.Timestamptz `json:"updated_at"`
 }
 
+type BookingIdempotencyKey struct {
+	UserID         int64              `json:"user_id"`
+	IdempotencyKey string             `json:"idempotency_key"`
+	RequestHash    []byte             `json:"request_hash"`
+	BookingID      pgtype.Int8        `json:"booking_id"`
+	CreatedAt      pgtype.Timestamptz `json:"created_at"`
+}
+
+type BookingStatusHistory struct {
+	ID              int64              `json:"id"`
+	BookingID       int64              `json:"booking_id"`
+	FromStatus      pgtype.Text        `json:"from_status"`
+	ToStatus        string             `json:"to_status"`
+	ChangedByUserID pgtype.Int8        `json:"changed_by_user_id"`
+	Reason          pgtype.Text        `json:"reason"`
+	CreatedAt       pgtype.Timestamptz `json:"created_at"`
+}
+
 type Hotel struct {
 	ID          int64              `json:"id"`
 	Name        string             `json:"name"`
@@ -74,9 +92,11 @@ type RoomType struct {
 }
 
 type RoomTypeAvailability struct {
-	RoomTypeID  int64       `json:"room_type_id"`
-	Date        pgtype.Date `json:"date"`
-	RoomsBooked int32       `json:"rooms_booked"`
+	RoomTypeID   int64       `json:"room_type_id"`
+	Date         pgtype.Date `json:"date"`
+	RoomsBooked  int32       `json:"rooms_booked"`
+	RoomsBlocked int32       `json:"rooms_blocked"`
+	BlockReason  pgtype.Text `json:"block_reason"`
 }
 
 type User struct {

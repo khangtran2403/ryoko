@@ -11,6 +11,35 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const attachBookingToIdempotencyKey = `-- name: AttachBookingToIdempotencyKey :execrows
+UPDATE booking_idempotency_keys
+SET booking_id = $1
+WHERE user_id = $2
+  AND idempotency_key = $3
+  AND request_hash = $4
+  AND booking_id IS NULL
+`
+
+type AttachBookingToIdempotencyKeyParams struct {
+	BookingID      pgtype.Int8 `json:"booking_id"`
+	UserID         int64       `json:"user_id"`
+	IdempotencyKey string      `json:"idempotency_key"`
+	RequestHash    []byte      `json:"request_hash"`
+}
+
+func (q *Queries) AttachBookingToIdempotencyKey(ctx context.Context, arg AttachBookingToIdempotencyKeyParams) (int64, error) {
+	result, err := q.db.Exec(ctx, attachBookingToIdempotencyKey,
+		arg.BookingID,
+		arg.UserID,
+		arg.IdempotencyKey,
+		arg.RequestHash,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
 const cancelBooking = `-- name: CancelBooking :one
 UPDATE bookings
 SET
@@ -59,21 +88,117 @@ func (q *Queries) CancelBooking(ctx context.Context, arg CancelBookingParams) (B
 	return i, err
 }
 
-const completePastBookings = `-- name: CompletePastBookings :execrows
+const cancelBookingForAdmin = `-- name: CancelBookingForAdmin :one
 UPDATE bookings
 SET
-    status = 'completed',
+    status = 'cancelled',
     updated_at = now()
-WHERE status = 'confirmed'
-  AND check_out <= $1::date
+WHERE id = $1
+  AND status = 'confirmed'
+RETURNING
+    id,
+    user_id,
+    room_type_id,
+    check_in,
+    check_out,
+    rooms_count,
+    guest_count,
+    price_per_night,
+    total_price,
+    status,
+    created_at,
+    updated_at
 `
 
-func (q *Queries) CompletePastBookings(ctx context.Context, today pgtype.Date) (int64, error) {
-	result, err := q.db.Exec(ctx, completePastBookings, today)
+func (q *Queries) CancelBookingForAdmin(ctx context.Context, bookingID int64) (Booking, error) {
+	row := q.db.QueryRow(ctx, cancelBookingForAdmin, bookingID)
+	var i Booking
+	err := row.Scan(
+		&i.ID,
+		&i.UserID,
+		&i.RoomTypeID,
+		&i.CheckIn,
+		&i.CheckOut,
+		&i.RoomsCount,
+		&i.GuestCount,
+		&i.PricePerNight,
+		&i.TotalPrice,
+		&i.Status,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const claimBookingIdempotencyKey = `-- name: ClaimBookingIdempotencyKey :execrows
+INSERT INTO booking_idempotency_keys (
+    user_id,
+    idempotency_key,
+    request_hash
+)
+VALUES (
+    $1,
+    $2,
+    $3
+)
+ON CONFLICT (user_id, idempotency_key)
+DO NOTHING
+`
+
+type ClaimBookingIdempotencyKeyParams struct {
+	UserID         int64  `json:"user_id"`
+	IdempotencyKey string `json:"idempotency_key"`
+	RequestHash    []byte `json:"request_hash"`
+}
+
+func (q *Queries) ClaimBookingIdempotencyKey(ctx context.Context, arg ClaimBookingIdempotencyKeyParams) (int64, error) {
+	result, err := q.db.Exec(ctx, claimBookingIdempotencyKey, arg.UserID, arg.IdempotencyKey, arg.RequestHash)
 	if err != nil {
 		return 0, err
 	}
 	return result.RowsAffected(), nil
+}
+
+const completePastBookings = `-- name: CompletePastBookings :one
+WITH completed_bookings AS (
+    UPDATE bookings
+    SET
+        status = 'completed',
+        updated_at = now()
+    WHERE status = 'confirmed'
+      AND check_out <= $1::date
+    RETURNING
+        id,
+        updated_at
+),
+recorded_history AS (
+    INSERT INTO booking_status_history (
+        booking_id,
+        from_status,
+        to_status,
+        changed_by_user_id,
+        reason,
+        created_at
+    )
+    SELECT
+        id,
+        'confirmed',
+        'completed',
+        NULL,
+        'Stay completed automatically',
+        updated_at
+    FROM completed_bookings
+    RETURNING booking_id
+)
+SELECT count(*)::bigint AS completed_count
+FROM recorded_history
+`
+
+func (q *Queries) CompletePastBookings(ctx context.Context, today pgtype.Date) (int64, error) {
+	row := q.db.QueryRow(ctx, completePastBookings, today)
+	var completed_count int64
+	err := row.Scan(&completed_count)
+	return completed_count, err
 }
 
 const createBooking = `-- name: CreateBooking :one
@@ -152,6 +277,60 @@ func (q *Queries) CreateBooking(ctx context.Context, arg CreateBookingParams) (B
 	return i, err
 }
 
+const createBookingStatusHistory = `-- name: CreateBookingStatusHistory :one
+INSERT INTO booking_status_history (
+    booking_id,
+    from_status,
+    to_status,
+    changed_by_user_id,
+    reason
+)
+VALUES (
+    $1,
+    $2::text,
+    $3,
+    $4::bigint,
+    $5::text
+)
+RETURNING
+    id,
+    booking_id,
+    from_status,
+    to_status,
+    changed_by_user_id,
+    reason,
+    created_at
+`
+
+type CreateBookingStatusHistoryParams struct {
+	BookingID       int64       `json:"booking_id"`
+	FromStatus      pgtype.Text `json:"from_status"`
+	ToStatus        string      `json:"to_status"`
+	ChangedByUserID pgtype.Int8 `json:"changed_by_user_id"`
+	Reason          pgtype.Text `json:"reason"`
+}
+
+func (q *Queries) CreateBookingStatusHistory(ctx context.Context, arg CreateBookingStatusHistoryParams) (BookingStatusHistory, error) {
+	row := q.db.QueryRow(ctx, createBookingStatusHistory,
+		arg.BookingID,
+		arg.FromStatus,
+		arg.ToStatus,
+		arg.ChangedByUserID,
+		arg.Reason,
+	)
+	var i BookingStatusHistory
+	err := row.Scan(
+		&i.ID,
+		&i.BookingID,
+		&i.FromStatus,
+		&i.ToStatus,
+		&i.ChangedByUserID,
+		&i.Reason,
+		&i.CreatedAt,
+	)
+	return i, err
+}
+
 const decrementAvailability = `-- name: DecrementAvailability :execrows
 UPDATE room_type_availability
 SET rooms_booked = rooms_booked - $1::int
@@ -209,6 +388,44 @@ func (q *Queries) EnsureAvailabilityRows(ctx context.Context, arg EnsureAvailabi
 	return err
 }
 
+const getBookingByIDForAdmin = `-- name: GetBookingByIDForAdmin :one
+SELECT
+    id,
+    user_id,
+    room_type_id,
+    check_in,
+    check_out,
+    rooms_count,
+    guest_count,
+    price_per_night,
+    total_price,
+    status,
+    created_at,
+    updated_at
+FROM bookings
+WHERE id = $1
+`
+
+func (q *Queries) GetBookingByIDForAdmin(ctx context.Context, bookingID int64) (Booking, error) {
+	row := q.db.QueryRow(ctx, getBookingByIDForAdmin, bookingID)
+	var i Booking
+	err := row.Scan(
+		&i.ID,
+		&i.UserID,
+		&i.RoomTypeID,
+		&i.CheckIn,
+		&i.CheckOut,
+		&i.RoomsCount,
+		&i.GuestCount,
+		&i.PricePerNight,
+		&i.TotalPrice,
+		&i.Status,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
 const getBookingByIDForUser = `-- name: GetBookingByIDForUser :one
 SELECT
     id,
@@ -235,6 +452,45 @@ type GetBookingByIDForUserParams struct {
 
 func (q *Queries) GetBookingByIDForUser(ctx context.Context, arg GetBookingByIDForUserParams) (Booking, error) {
 	row := q.db.QueryRow(ctx, getBookingByIDForUser, arg.BookingID, arg.UserID)
+	var i Booking
+	err := row.Scan(
+		&i.ID,
+		&i.UserID,
+		&i.RoomTypeID,
+		&i.CheckIn,
+		&i.CheckOut,
+		&i.RoomsCount,
+		&i.GuestCount,
+		&i.PricePerNight,
+		&i.TotalPrice,
+		&i.Status,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const getBookingForAdminCancellation = `-- name: GetBookingForAdminCancellation :one
+SELECT
+    id,
+    user_id,
+    room_type_id,
+    check_in,
+    check_out,
+    rooms_count,
+    guest_count,
+    price_per_night,
+    total_price,
+    status,
+    created_at,
+    updated_at
+FROM bookings
+WHERE id = $1
+FOR UPDATE
+`
+
+func (q *Queries) GetBookingForAdminCancellation(ctx context.Context, bookingID int64) (Booking, error) {
+	row := q.db.QueryRow(ctx, getBookingForAdminCancellation, bookingID)
 	var i Booking
 	err := row.Scan(
 		&i.ID,
@@ -298,6 +554,32 @@ func (q *Queries) GetBookingForCancellation(ctx context.Context, arg GetBookingF
 	return i, err
 }
 
+const getBookingIdempotencyKey = `-- name: GetBookingIdempotencyKey :one
+SELECT
+    request_hash,
+    booking_id
+FROM booking_idempotency_keys
+WHERE user_id = $1
+  AND idempotency_key = $2
+`
+
+type GetBookingIdempotencyKeyParams struct {
+	UserID         int64  `json:"user_id"`
+	IdempotencyKey string `json:"idempotency_key"`
+}
+
+type GetBookingIdempotencyKeyRow struct {
+	RequestHash []byte      `json:"request_hash"`
+	BookingID   pgtype.Int8 `json:"booking_id"`
+}
+
+func (q *Queries) GetBookingIdempotencyKey(ctx context.Context, arg GetBookingIdempotencyKeyParams) (GetBookingIdempotencyKeyRow, error) {
+	row := q.db.QueryRow(ctx, getBookingIdempotencyKey, arg.UserID, arg.IdempotencyKey)
+	var i GetBookingIdempotencyKeyRow
+	err := row.Scan(&i.RequestHash, &i.BookingID)
+	return i, err
+}
+
 const getRoomTypeForBooking = `-- name: GetRoomTypeForBooking :one
 SELECT
     id,
@@ -334,7 +616,9 @@ SET rooms_booked = rooms_booked + $1::int
 WHERE room_type_id = $2
   AND date >= $3::date
   AND date < $4::date
-  AND rooms_booked + $1::int
+  AND rooms_booked 
+      + rooms_blocked
+      + $1::int
       <= $5::int
 `
 
@@ -358,6 +642,98 @@ func (q *Queries) IncrementAvailability(ctx context.Context, arg IncrementAvaila
 		return 0, err
 	}
 	return result.RowsAffected(), nil
+}
+
+const listBookingStatusHistoryForAdmin = `-- name: ListBookingStatusHistoryForAdmin :many
+SELECT
+    id,
+    booking_id,
+    from_status,
+    to_status,
+    changed_by_user_id,
+    reason,
+    created_at
+FROM booking_status_history
+WHERE booking_id = $1
+ORDER BY created_at ASC, id ASC
+`
+
+func (q *Queries) ListBookingStatusHistoryForAdmin(ctx context.Context, bookingID int64) ([]BookingStatusHistory, error) {
+	rows, err := q.db.Query(ctx, listBookingStatusHistoryForAdmin, bookingID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []BookingStatusHistory
+	for rows.Next() {
+		var i BookingStatusHistory
+		if err := rows.Scan(
+			&i.ID,
+			&i.BookingID,
+			&i.FromStatus,
+			&i.ToStatus,
+			&i.ChangedByUserID,
+			&i.Reason,
+			&i.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listBookingStatusHistoryForUser = `-- name: ListBookingStatusHistoryForUser :many
+SELECT
+    bsh.id,
+    bsh.booking_id,
+    bsh.from_status,
+    bsh.to_status,
+    bsh.changed_by_user_id,
+    bsh.reason,
+    bsh.created_at
+FROM booking_status_history AS bsh
+JOIN bookings AS b
+    ON b.id = bsh.booking_id
+WHERE bsh.booking_id = $1
+  AND b.user_id = $2
+ORDER BY bsh.created_at ASC, bsh.id ASC
+`
+
+type ListBookingStatusHistoryForUserParams struct {
+	BookingID int64 `json:"booking_id"`
+	UserID    int64 `json:"user_id"`
+}
+
+func (q *Queries) ListBookingStatusHistoryForUser(ctx context.Context, arg ListBookingStatusHistoryForUserParams) ([]BookingStatusHistory, error) {
+	rows, err := q.db.Query(ctx, listBookingStatusHistoryForUser, arg.BookingID, arg.UserID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []BookingStatusHistory
+	for rows.Next() {
+		var i BookingStatusHistory
+		if err := rows.Scan(
+			&i.ID,
+			&i.BookingID,
+			&i.FromStatus,
+			&i.ToStatus,
+			&i.ChangedByUserID,
+			&i.Reason,
+			&i.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const listBookingsByUser = `-- name: ListBookingsByUser :many
@@ -420,10 +796,136 @@ func (q *Queries) ListBookingsByUser(ctx context.Context, arg ListBookingsByUser
 	return items, nil
 }
 
+const listBookingsForAdmin = `-- name: ListBookingsForAdmin :many
+SELECT
+    b.id AS booking_id,
+    b.user_id,
+    u.full_name AS customer_name,
+    u.email AS customer_email,
+    b.room_type_id,
+    rt.name AS room_type_name,
+    h.id AS hotel_id,
+    h.name AS hotel_name,
+    b.check_in,
+    b.check_out,
+    (b.check_out - b.check_in)::int AS number_of_nights,
+    b.rooms_count,
+    b.guest_count,
+    b.price_per_night,
+    b.total_price,
+    b.status,
+    b.created_at,
+    b.updated_at
+FROM bookings AS b
+JOIN users AS u
+    ON u.id = b.user_id
+JOIN room_types AS rt
+    ON rt.id = b.room_type_id
+JOIN hotels AS h
+    ON h.id = rt.hotel_id
+WHERE (
+    $1::bigint IS NULL
+    OR h.id = $1::bigint
+)
+AND (
+    $2::text IS NULL
+    OR b.status = $2::text
+)
+AND (
+    $3::date IS NULL
+    OR b.check_in >= $3::date
+)
+AND (
+    $4::date IS NULL
+    OR b.check_in <= $4::date
+)
+ORDER BY b.created_at DESC, b.id DESC
+LIMIT $6::bigint
+OFFSET $5::bigint
+`
+
+type ListBookingsForAdminParams struct {
+	HotelID      pgtype.Int8 `json:"hotel_id"`
+	Status       pgtype.Text `json:"status"`
+	CheckInFrom  pgtype.Date `json:"check_in_from"`
+	CheckInTo    pgtype.Date `json:"check_in_to"`
+	ResultOffset int64       `json:"result_offset"`
+	ResultLimit  int64       `json:"result_limit"`
+}
+
+type ListBookingsForAdminRow struct {
+	BookingID      int64              `json:"booking_id"`
+	UserID         int64              `json:"user_id"`
+	CustomerName   string             `json:"customer_name"`
+	CustomerEmail  string             `json:"customer_email"`
+	RoomTypeID     int64              `json:"room_type_id"`
+	RoomTypeName   string             `json:"room_type_name"`
+	HotelID        int64              `json:"hotel_id"`
+	HotelName      string             `json:"hotel_name"`
+	CheckIn        pgtype.Date        `json:"check_in"`
+	CheckOut       pgtype.Date        `json:"check_out"`
+	NumberOfNights int32              `json:"number_of_nights"`
+	RoomsCount     int32              `json:"rooms_count"`
+	GuestCount     int32              `json:"guest_count"`
+	PricePerNight  pgtype.Numeric     `json:"price_per_night"`
+	TotalPrice     pgtype.Numeric     `json:"total_price"`
+	Status         string             `json:"status"`
+	CreatedAt      pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt      pgtype.Timestamptz `json:"updated_at"`
+}
+
+func (q *Queries) ListBookingsForAdmin(ctx context.Context, arg ListBookingsForAdminParams) ([]ListBookingsForAdminRow, error) {
+	rows, err := q.db.Query(ctx, listBookingsForAdmin,
+		arg.HotelID,
+		arg.Status,
+		arg.CheckInFrom,
+		arg.CheckInTo,
+		arg.ResultOffset,
+		arg.ResultLimit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListBookingsForAdminRow
+	for rows.Next() {
+		var i ListBookingsForAdminRow
+		if err := rows.Scan(
+			&i.BookingID,
+			&i.UserID,
+			&i.CustomerName,
+			&i.CustomerEmail,
+			&i.RoomTypeID,
+			&i.RoomTypeName,
+			&i.HotelID,
+			&i.HotelName,
+			&i.CheckIn,
+			&i.CheckOut,
+			&i.NumberOfNights,
+			&i.RoomsCount,
+			&i.GuestCount,
+			&i.PricePerNight,
+			&i.TotalPrice,
+			&i.Status,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const lockAvailabilityRows = `-- name: LockAvailabilityRows :many
 SELECT
     date,
-    rooms_booked
+    rooms_booked,
+    rooms_blocked,
+    block_reason
 FROM room_type_availability
 WHERE room_type_id = $1
   AND date >= $2::date
@@ -439,8 +941,10 @@ type LockAvailabilityRowsParams struct {
 }
 
 type LockAvailabilityRowsRow struct {
-	Date        pgtype.Date `json:"date"`
-	RoomsBooked int32       `json:"rooms_booked"`
+	Date         pgtype.Date `json:"date"`
+	RoomsBooked  int32       `json:"rooms_booked"`
+	RoomsBlocked int32       `json:"rooms_blocked"`
+	BlockReason  pgtype.Text `json:"block_reason"`
 }
 
 func (q *Queries) LockAvailabilityRows(ctx context.Context, arg LockAvailabilityRowsParams) ([]LockAvailabilityRowsRow, error) {
@@ -452,7 +956,12 @@ func (q *Queries) LockAvailabilityRows(ctx context.Context, arg LockAvailability
 	var items []LockAvailabilityRowsRow
 	for rows.Next() {
 		var i LockAvailabilityRowsRow
-		if err := rows.Scan(&i.Date, &i.RoomsBooked); err != nil {
+		if err := rows.Scan(
+			&i.Date,
+			&i.RoomsBooked,
+			&i.RoomsBlocked,
+			&i.BlockReason,
+		); err != nil {
 			return nil, err
 		}
 		items = append(items, i)

@@ -38,11 +38,11 @@ WITH available_room_types AS (
        AND rta.date < sqlc.arg(check_out)::date
     GROUP BY rt.id
     HAVING
-        rt.total_rooms - COALESCE(MAX(rta.rooms_booked), 0)
-            >= sqlc.arg(rooms_count)::int
-        AND rt.capacity::bigint
-            * sqlc.arg(rooms_count)::int
-            >= sqlc.arg(guest_count)::int
+    rt.total_rooms
+        - COALESCE(MAX(rta.rooms_booked + rta.rooms_blocked), 0)
+        >= sqlc.arg(rooms_count)::int
+    AND rt.capacity * sqlc.arg(rooms_count)::int
+        >= sqlc.arg(guest_count)::int
 ),
 matching_hotels AS (
     SELECT

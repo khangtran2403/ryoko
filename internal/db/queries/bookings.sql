@@ -27,7 +27,9 @@ ON CONFLICT (room_type_id, date) DO NOTHING;
 -- name: LockAvailabilityRows :many
 SELECT
     date,
-    rooms_booked
+    rooms_booked,
+    rooms_blocked,
+    block_reason
 FROM room_type_availability
 WHERE room_type_id = sqlc.arg(room_type_id)
   AND date >= sqlc.arg(check_in)::date
@@ -41,7 +43,9 @@ SET rooms_booked = rooms_booked + sqlc.arg(rooms_count)::int
 WHERE room_type_id = sqlc.arg(room_type_id)
   AND date >= sqlc.arg(check_in)::date
   AND date < sqlc.arg(check_out)::date
-  AND rooms_booked + sqlc.arg(rooms_count)::int
+  AND rooms_booked 
+      + rooms_blocked
+      + sqlc.arg(rooms_count)::int
       <= sqlc.arg(total_rooms)::int;
 
 -- name: CreateBooking :one

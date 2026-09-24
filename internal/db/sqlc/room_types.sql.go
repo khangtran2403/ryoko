@@ -94,8 +94,8 @@ SELECT
     rt.total_rooms,
     rt.created_at,
     (
-        rt.total_rooms
-        - COALESCE(MAX(rta.rooms_booked), 0)
+         rt.total_rooms
+    - COALESCE(MAX(rta.rooms_booked + rta.rooms_blocked), 0)
     )::int AS rooms_available
 FROM room_types AS rt
 LEFT JOIN room_type_availability AS rta
@@ -105,7 +105,8 @@ LEFT JOIN room_type_availability AS rta
 WHERE rt.hotel_id = $3
 GROUP BY rt.id
 HAVING
-    rt.total_rooms - COALESCE(MAX(rta.rooms_booked), 0)
+    rt.total_rooms
+        - COALESCE(MAX(rta.rooms_booked + rta.rooms_blocked), 0)
         >= $4::int
     AND rt.capacity * $4::int
         >= $5::int

@@ -38,8 +38,8 @@ SELECT
     rt.total_rooms,
     rt.created_at,
     (
-        rt.total_rooms
-        - COALESCE(MAX(rta.rooms_booked), 0)
+         rt.total_rooms
+    - COALESCE(MAX(rta.rooms_booked + rta.rooms_blocked), 0)
     )::int AS rooms_available
 FROM room_types AS rt
 LEFT JOIN room_type_availability AS rta
@@ -49,7 +49,8 @@ LEFT JOIN room_type_availability AS rta
 WHERE rt.hotel_id = sqlc.arg(hotel_id)
 GROUP BY rt.id
 HAVING
-    rt.total_rooms - COALESCE(MAX(rta.rooms_booked), 0)
+    rt.total_rooms
+        - COALESCE(MAX(rta.rooms_booked + rta.rooms_blocked), 0)
         >= sqlc.arg(rooms_count)::int
     AND rt.capacity * sqlc.arg(rooms_count)::int
         >= sqlc.arg(guest_count)::int
