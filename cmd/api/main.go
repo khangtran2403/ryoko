@@ -21,8 +21,10 @@ import (
 	"github.com/khangtran2403/ryoko/internal/handler"
 	"github.com/khangtran2403/ryoko/internal/hotel"
 	hotelimages "github.com/khangtran2403/ryoko/internal/hotel_images"
+	"github.com/khangtran2403/ryoko/internal/inventory"
 	"github.com/khangtran2403/ryoko/internal/middleware"
 	"github.com/khangtran2403/ryoko/internal/review"
+	"github.com/khangtran2403/ryoko/internal/roomtype"
 )
 
 func main() {
@@ -54,7 +56,8 @@ func main() {
 	}
 	hotelService := hotel.NewService(queries)
 	hotelHandler := handler.NewHotelHandler(queries, hotelService)
-	roomTypeHandler := handler.NewRoomTypeHandler(queries)
+	roomTypeService := roomtype.NewService(pool, queries)
+	roomTypeHandler := handler.NewRoomTypeHandler(queries, roomTypeService)
 	amenityHandler := handler.NewAmenityHandler(queries)
 	userHandler := handler.NewUserHandler(queries)
 	authHandler := handler.NewAuthHandler(queries, tokenManager)
@@ -72,6 +75,8 @@ func main() {
 	reviewHandler := handler.NewReviewHandler(reviewService)
 	hotelImageService := hotelimages.NewService(pool, queries)
 	hotelImageHandler := handler.NewHotelImageHandler(hotelImageService)
+	inventoryService := inventory.NewService(pool, queries)
+	inventoryHandler := handler.NewInventoryHandler(inventoryService)
 	adminOnly := func(handler http.HandlerFunc) http.Handler {
 		return authMiddleware.Authenticate(
 			middleware.RequireRole(
@@ -105,6 +110,15 @@ func main() {
 	mux.Handle("GET /me/bookings/{bookingID}/history", authMiddleware.Authenticate(http.HandlerFunc(bookingHandler.ListBookingStatusHistoryForUser)))
 	mux.Handle("GET /admin/bookings/{bookingID}/history", adminOnly(adminBookingHandler.ListBookingHistoryForAdmin))
 	mux.Handle("POST /admin/bookings/{bookingID}/cancel", adminOnly(adminBookingHandler.AdminCancellation))
+	mux.Handle(
+		"PUT /admin/room-types/{roomTypeID}/blocked-inventory",
+		adminOnly(inventoryHandler.BlockedInventory),
+	)
+
+	mux.Handle(
+		"GET /admin/room-types/{roomTypeID}/inventory",
+		adminOnly(inventoryHandler.ListRoomTypeInventory),
+	)
 	mux.Handle(
 		"GET /me",
 		authMiddleware.Authenticate(
