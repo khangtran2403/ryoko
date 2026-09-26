@@ -62,6 +62,19 @@ func (q *Queries) DeleteRoomType(ctx context.Context, id int64) (int64, error) {
 	return id_2, err
 }
 
+const getMaxRoomTypeInventoryUsage = `-- name: GetMaxRoomTypeInventoryUsage :one
+SELECT COALESCE(MAX(rooms_booked + rooms_blocked), 0)::int
+FROM room_type_availability
+WHERE room_type_id = $1
+`
+
+func (q *Queries) GetMaxRoomTypeInventoryUsage(ctx context.Context, roomTypeID int64) (int32, error) {
+	row := q.db.QueryRow(ctx, getMaxRoomTypeInventoryUsage, roomTypeID)
+	var column_1 int32
+	err := row.Scan(&column_1)
+	return column_1, err
+}
+
 const getRoomTypeByID = `-- name: GetRoomTypeByID :one
 SELECT id, hotel_id, name, description, price_per_night, capacity, total_rooms, created_at FROM room_types
 WHERE id = $1
@@ -69,6 +82,29 @@ WHERE id = $1
 
 func (q *Queries) GetRoomTypeByID(ctx context.Context, id int64) (RoomType, error) {
 	row := q.db.QueryRow(ctx, getRoomTypeByID, id)
+	var i RoomType
+	err := row.Scan(
+		&i.ID,
+		&i.HotelID,
+		&i.Name,
+		&i.Description,
+		&i.PricePerNight,
+		&i.Capacity,
+		&i.TotalRooms,
+		&i.CreatedAt,
+	)
+	return i, err
+}
+
+const getRoomTypeForUpdate = `-- name: GetRoomTypeForUpdate :one
+SELECT id, hotel_id, name, description, price_per_night, capacity, total_rooms, created_at
+FROM room_types
+WHERE id = $1
+FOR UPDATE
+`
+
+func (q *Queries) GetRoomTypeForUpdate(ctx context.Context, id int64) (RoomType, error) {
+	row := q.db.QueryRow(ctx, getRoomTypeForUpdate, id)
 	var i RoomType
 	err := row.Scan(
 		&i.ID,

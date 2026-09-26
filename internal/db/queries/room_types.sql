@@ -6,7 +6,16 @@ RETURNING *;
 -- name: GetRoomTypeByID :one
 SELECT * FROM room_types
 WHERE id = $1;
+-- name: GetRoomTypeForUpdate :one
+SELECT *
+FROM room_types
+WHERE id = $1
+FOR UPDATE;
 
+-- name: GetMaxRoomTypeInventoryUsage :one
+SELECT COALESCE(MAX(rooms_booked + rooms_blocked), 0)::int
+FROM room_type_availability
+WHERE room_type_id = $1;
 -- name: ListRoomTypesByHotel :many
 SELECT * FROM room_types
 WHERE hotel_id = $1

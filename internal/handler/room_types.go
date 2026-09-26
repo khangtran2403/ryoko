@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -11,10 +12,16 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/khangtran2403/ryoko/internal/db/sqlc"
+	"github.com/khangtran2403/ryoko/internal/roomtype"
 )
+
+type roomTypeService interface {
+	UpdateRoomType(ctx context.Context, input roomtype.UpdateRoomTypeRequest) (sqlc.RoomType, error)
+}
 
 type RoomTypeHandler struct {
 	queries *sqlc.Queries
+	service roomTypeService
 }
 type CreateRoomTypeRequest struct {
 	Name          string `json:"name"`
@@ -24,9 +31,10 @@ type CreateRoomTypeRequest struct {
 	TotalRooms    int32  `json:"total_rooms"`
 }
 
-func NewRoomTypeHandler(queries *sqlc.Queries) *RoomTypeHandler {
+func NewRoomTypeHandler(queries *sqlc.Queries, service roomTypeService) *RoomTypeHandler {
 	return &RoomTypeHandler{
 		queries: queries,
+		service: service,
 	}
 }
 func (req CreateRoomTypeRequest) Validate() []string {
@@ -161,7 +169,7 @@ func (h *RoomTypeHandler) UpdateRoomType(w http.ResponseWriter, r *http.Request)
 	// error already ruled out by Validate() above
 	_ = price.Scan(req.PricePerNight)
 
-	updatedRoomType, err := h.queries.UpdateRoomType(r.Context(), sqlc.UpdateRoomTypeParams{
+	updatedRoomType, err := h.service.UpdateRoomType(r.Context(), roomtype.UpdateRoomTypeRequest{
 		ID:            convId,
 		Name:          req.Name,
 		Description:   PgtypeconvertToString(req.Description),
@@ -169,8 +177,16 @@ func (h *RoomTypeHandler) UpdateRoomType(w http.ResponseWriter, r *http.Request)
 		Capacity:      req.Capacity,
 		TotalRooms:    req.TotalRooms,
 	})
-	if errors.Is(err, pgx.ErrNoRows) {
+	if errors.Is(err, roomtype.ErrInvalidID) || errors.Is(err, roomtype.ErrInvalidTotalRooms) {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if errors.Is(err, roomtype.ErrRoomTypeNotFound) {
 		http.Error(w, "Room type not found", http.StatusNotFound)
+		return
+	}
+	if errors.Is(err, roomtype.ErrInventoryConflict) {
+		http.Error(w, err.Error(), http.StatusConflict)
 		return
 	}
 	if err != nil {
