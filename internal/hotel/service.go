@@ -85,3 +85,18 @@ func (s *Service) GetHotelDetailsByID(ctx context.Context, hotelID int64) (Hotel
 		ReviewSummary: getReviewSummary,
 	}, nil
 }
+func (s *Service) DeactivateHotel(ctx context.Context, hotelID int64) error {
+	if hotelID <= 0 {
+		return ErrInvalidHotelID
+	}
+
+	_, err := s.queries.DeactivateHotel(ctx, hotelID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ErrHotelNotFound
+	}
+	if err != nil {
+		return fmt.Errorf("deactivate hotel: %w", err)
+	}
+
+	return nil
+}

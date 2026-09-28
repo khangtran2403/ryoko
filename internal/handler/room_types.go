@@ -9,7 +9,6 @@ import (
 	"strings"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/khangtran2403/ryoko/internal/db/sqlc"
 	"github.com/khangtran2403/ryoko/internal/roomtype"
@@ -17,6 +16,7 @@ import (
 
 type roomTypeService interface {
 	UpdateRoomType(ctx context.Context, input roomtype.UpdateRoomTypeRequest) (sqlc.RoomType, error)
+	DeactivateRoomType(ctx context.Context, roomTypeID int64) error
 }
 
 type RoomTypeHandler struct {
@@ -60,7 +60,6 @@ func (req CreateRoomTypeRequest) Validate() []string {
 
 func (h *RoomTypeHandler) CreateRoomType(w http.ResponseWriter, r *http.Request) {
 	var req CreateRoomTypeRequest
-	var pgErr *pgconn.PgError
 
 	getHotelid := r.PathValue("hotelID")
 	err := json.NewDecoder(r.Body).Decode(&req)
@@ -69,7 +68,7 @@ func (h *RoomTypeHandler) CreateRoomType(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	convHotelID, err := strconv.ParseInt(getHotelid, 10, 64)
-	if err != nil {
+	if err != nil || convHotelID <= 0 {
 		http.Error(w, "Invalid hotel ID", http.StatusBadRequest)
 		return
 	}
@@ -91,8 +90,8 @@ func (h *RoomTypeHandler) CreateRoomType(w http.ResponseWriter, r *http.Request)
 		Capacity:      req.Capacity,
 		TotalRooms:    req.TotalRooms,
 	})
-	if errors.As(err, &pgErr) && pgErr.Code == "23503" {
-		http.Error(w, "hotel does not exist", http.StatusBadRequest)
+	if errors.Is(err, pgx.ErrNoRows) {
+		http.Error(w, "Hotel not found", http.StatusNotFound)
 		return
 	}
 	if err != nil {
@@ -208,8 +207,12 @@ func (h *RoomTypeHandler) DeleteRoomType(w http.ResponseWriter, r *http.Request)
 		http.Error(w, "Invalid room type ID", http.StatusBadRequest)
 		return
 	}
-	_, err = h.queries.DeleteRoomType(r.Context(), convId)
-	if errors.Is(err, pgx.ErrNoRows) {
+	err = h.service.DeactivateRoomType(r.Context(), convId)
+	if errors.Is(err, roomtype.ErrInvalidID) {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if errors.Is(err, roomtype.ErrRoomTypeNotFound) {
 		http.Error(w, "Room type not found", http.StatusNotFound)
 		return
 	}

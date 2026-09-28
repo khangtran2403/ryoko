@@ -14,7 +14,7 @@ import (
 const createHotel = `-- name: CreateHotel :one
 INSERT INTO hotels (name, address, city, description)
 VALUES ($1, $2, $3, $4)
-RETURNING id, name, address, city, description, created_at
+RETURNING id, name, address, city, description, is_active, created_at
 `
 
 type CreateHotelParams struct {
@@ -38,27 +38,32 @@ func (q *Queries) CreateHotel(ctx context.Context, arg CreateHotelParams) (Hotel
 		&i.Address,
 		&i.City,
 		&i.Description,
+		&i.IsActive,
 		&i.CreatedAt,
 	)
 	return i, err
 }
 
-const deleteHotel = `-- name: DeleteHotel :one
-DELETE FROM hotels
+const deactivateHotel = `-- name: DeactivateHotel :one
+UPDATE hotels
+SET is_active = false
 WHERE id = $1
+  AND is_active = true
 RETURNING id
 `
 
-func (q *Queries) DeleteHotel(ctx context.Context, id int64) (int64, error) {
-	row := q.db.QueryRow(ctx, deleteHotel, id)
+func (q *Queries) DeactivateHotel(ctx context.Context, id int64) (int64, error) {
+	row := q.db.QueryRow(ctx, deactivateHotel, id)
 	var id_2 int64
 	err := row.Scan(&id_2)
 	return id_2, err
 }
 
 const getHotelByID = `-- name: GetHotelByID :one
-SELECT id, name, address, city, description, created_at FROM hotels
+SELECT id, name, address, city, description, is_active, created_at
+FROM hotels
 WHERE id = $1
+  AND is_active = true
 `
 
 func (q *Queries) GetHotelByID(ctx context.Context, id int64) (Hotel, error) {
@@ -70,15 +75,18 @@ func (q *Queries) GetHotelByID(ctx context.Context, id int64) (Hotel, error) {
 		&i.Address,
 		&i.City,
 		&i.Description,
+		&i.IsActive,
 		&i.CreatedAt,
 	)
 	return i, err
 }
 
 const listHotelsByCity = `-- name: ListHotelsByCity :many
-SELECT id, name, address, city, description, created_at FROM hotels
+SELECT id, name, address, city, description, is_active, created_at
+FROM hotels
 WHERE city = $1
-ORDER BY name
+  AND is_active = true
+ORDER BY name, id
 `
 
 func (q *Queries) ListHotelsByCity(ctx context.Context, city string) ([]Hotel, error) {
@@ -96,6 +104,7 @@ func (q *Queries) ListHotelsByCity(ctx context.Context, city string) ([]Hotel, e
 			&i.Address,
 			&i.City,
 			&i.Description,
+			&i.IsActive,
 			&i.CreatedAt,
 		); err != nil {
 			return nil, err
@@ -119,13 +128,17 @@ WITH available_room_types AS (
         ON rta.room_type_id = rt.id
        AND rta.date >= $4::date
        AND rta.date < $5::date
+    WHERE rt.is_active = true
     GROUP BY rt.id
     HAVING
-    rt.total_rooms
-        - COALESCE(MAX(rta.rooms_booked + rta.rooms_blocked), 0)
-        >= $6::int
-    AND rt.capacity * $6::int
-        >= $7::int
+        rt.total_rooms
+            - COALESCE(
+                MAX(rta.rooms_booked + rta.rooms_blocked),
+                0
+            )
+            >= $6::int
+        AND rt.capacity * $6::int
+            >= $7::int
 ),
 matching_hotels AS (
     SELECT
@@ -136,8 +149,10 @@ matching_hotels AS (
         h.description,
         h.created_at,
         hi.image_url AS primary_image_url,
-        MIN(art.price_per_night)::numeric(10,2) AS starting_price,
-        COUNT(art.id)::int AS available_room_type_count
+        MIN(art.price_per_night)::numeric(10, 2)
+            AS starting_price,
+        COUNT(art.id)::int
+            AS available_room_type_count
     FROM hotels AS h
     JOIN available_room_types AS art
         ON art.hotel_id = h.id
@@ -145,6 +160,7 @@ matching_hotels AS (
         ON hi.hotel_id = h.id
        AND hi.is_primary = true
     WHERE lower(h.city) = lower($8)
+       AND h.is_active = true
     GROUP BY
         h.id,
         hi.image_url
@@ -153,10 +169,12 @@ SELECT id, name, address, city, description, created_at, primary_image_url, star
 FROM matching_hotels
 ORDER BY
     CASE
-        WHEN $1::text = 'price_asc' THEN starting_price
+        WHEN $1::text = 'price_asc'
+            THEN starting_price
     END ASC,
     CASE
-        WHEN $1::text = 'price_desc' THEN starting_price
+        WHEN $1::text = 'price_desc'
+            THEN starting_price
     END DESC,
     id ASC
 LIMIT $3::bigint
@@ -233,7 +251,8 @@ SET
     city = $4,
     description = $5
 WHERE id = $1
-RETURNING id, name, address, city, description, created_at
+  AND is_active = true
+RETURNING id, name, address, city, description, is_active, created_at
 `
 
 type UpdateHotelParams struct {
@@ -259,6 +278,7 @@ func (q *Queries) UpdateHotel(ctx context.Context, arg UpdateHotelParams) (Hotel
 		&i.Address,
 		&i.City,
 		&i.Description,
+		&i.IsActive,
 		&i.CreatedAt,
 	)
 	return i, err

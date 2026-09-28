@@ -16,6 +16,7 @@ import (
 
 type hotelService interface {
 	GetHotelDetailsByID(ctx context.Context, hotelID int64) (hotel.HotelResponse, error)
+	DeactivateHotel(ctx context.Context, hotelID int64) error
 }
 type HotelHandler struct {
 	queries *sqlc.Queries
@@ -177,13 +178,17 @@ func (h *HotelHandler) DeleteHotel(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Invalid hotel ID", http.StatusBadRequest)
 		return
 	}
-	_, err = h.queries.DeleteHotel(r.Context(), convId)
-	if errors.Is(err, pgx.ErrNoRows) {
+	err = h.service.DeactivateHotel(r.Context(), convId)
+	if errors.Is(err, hotel.ErrInvalidHotelID) {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if errors.Is(err, hotel.ErrHotelNotFound) {
 		http.Error(w, "Hotel not found", http.StatusNotFound)
 		return
 	}
 	if err != nil {
-		http.Error(w, "Failed to delete hotel", http.StatusInternalServerError)
+		http.Error(w, "Failed to deactivate hotel", http.StatusInternalServerError)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)

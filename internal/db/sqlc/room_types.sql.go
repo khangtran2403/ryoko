@@ -12,28 +12,44 @@ import (
 )
 
 const createRoomType = `-- name: CreateRoomType :one
-INSERT INTO room_types (hotel_id, name, description, price_per_night, capacity, total_rooms)
-VALUES ($1, $2, $3, $4, $5, $6)
-RETURNING id, hotel_id, name, description, price_per_night, capacity, total_rooms, created_at
+INSERT INTO room_types (
+    hotel_id,
+    name,
+    description,
+    price_per_night,
+    capacity,
+    total_rooms
+)
+SELECT
+    h.id,
+    $1::text,
+    $2::text,
+    $3::numeric,
+    $4::int,
+    $5::int
+FROM hotels AS h
+WHERE h.id = $6
+  AND h.is_active = true
+RETURNING id, hotel_id, name, description, price_per_night, capacity, total_rooms, is_active, created_at
 `
 
 type CreateRoomTypeParams struct {
-	HotelID       int64          `json:"hotel_id"`
 	Name          string         `json:"name"`
 	Description   pgtype.Text    `json:"description"`
 	PricePerNight pgtype.Numeric `json:"price_per_night"`
 	Capacity      int32          `json:"capacity"`
 	TotalRooms    int32          `json:"total_rooms"`
+	HotelID       int64          `json:"hotel_id"`
 }
 
 func (q *Queries) CreateRoomType(ctx context.Context, arg CreateRoomTypeParams) (RoomType, error) {
 	row := q.db.QueryRow(ctx, createRoomType,
-		arg.HotelID,
 		arg.Name,
 		arg.Description,
 		arg.PricePerNight,
 		arg.Capacity,
 		arg.TotalRooms,
+		arg.HotelID,
 	)
 	var i RoomType
 	err := row.Scan(
@@ -44,19 +60,22 @@ func (q *Queries) CreateRoomType(ctx context.Context, arg CreateRoomTypeParams) 
 		&i.PricePerNight,
 		&i.Capacity,
 		&i.TotalRooms,
+		&i.IsActive,
 		&i.CreatedAt,
 	)
 	return i, err
 }
 
-const deleteRoomType = `-- name: DeleteRoomType :one
-DELETE FROM room_types
+const deactivateRoomType = `-- name: DeactivateRoomType :one
+UPDATE room_types
+SET is_active = false
 WHERE id = $1
+  AND is_active = true
 RETURNING id
 `
 
-func (q *Queries) DeleteRoomType(ctx context.Context, id int64) (int64, error) {
-	row := q.db.QueryRow(ctx, deleteRoomType, id)
+func (q *Queries) DeactivateRoomType(ctx context.Context, id int64) (int64, error) {
+	row := q.db.QueryRow(ctx, deactivateRoomType, id)
 	var id_2 int64
 	err := row.Scan(&id_2)
 	return id_2, err
@@ -76,8 +95,13 @@ func (q *Queries) GetMaxRoomTypeInventoryUsage(ctx context.Context, roomTypeID i
 }
 
 const getRoomTypeByID = `-- name: GetRoomTypeByID :one
-SELECT id, hotel_id, name, description, price_per_night, capacity, total_rooms, created_at FROM room_types
-WHERE id = $1
+SELECT rt.id, rt.hotel_id, rt.name, rt.description, rt.price_per_night, rt.capacity, rt.total_rooms, rt.is_active, rt.created_at
+FROM room_types AS rt
+JOIN hotels AS h
+    ON h.id = rt.hotel_id
+WHERE rt.id = $1
+  AND rt.is_active = true
+  AND h.is_active = true
 `
 
 func (q *Queries) GetRoomTypeByID(ctx context.Context, id int64) (RoomType, error) {
@@ -91,16 +115,22 @@ func (q *Queries) GetRoomTypeByID(ctx context.Context, id int64) (RoomType, erro
 		&i.PricePerNight,
 		&i.Capacity,
 		&i.TotalRooms,
+		&i.IsActive,
 		&i.CreatedAt,
 	)
 	return i, err
 }
 
 const getRoomTypeForUpdate = `-- name: GetRoomTypeForUpdate :one
-SELECT id, hotel_id, name, description, price_per_night, capacity, total_rooms, created_at
-FROM room_types
-WHERE id = $1
-FOR UPDATE
+SELECT rt.id, rt.hotel_id, rt.name, rt.description, rt.price_per_night, rt.capacity, rt.total_rooms, rt.is_active, rt.created_at
+FROM room_types AS rt
+JOIN hotels AS h
+    ON h.id = rt.hotel_id
+WHERE rt.id = $1
+  AND rt.is_active = true
+  AND h.is_active = true
+FOR SHARE OF h
+FOR UPDATE OF rt
 `
 
 func (q *Queries) GetRoomTypeForUpdate(ctx context.Context, id int64) (RoomType, error) {
@@ -114,6 +144,7 @@ func (q *Queries) GetRoomTypeForUpdate(ctx context.Context, id int64) (RoomType,
 		&i.PricePerNight,
 		&i.Capacity,
 		&i.TotalRooms,
+		&i.IsActive,
 		&i.CreatedAt,
 	)
 	return i, err
@@ -134,11 +165,15 @@ SELECT
     - COALESCE(MAX(rta.rooms_booked + rta.rooms_blocked), 0)
     )::int AS rooms_available
 FROM room_types AS rt
+JOIN hotels AS h
+    ON h.id = rt.hotel_id
 LEFT JOIN room_type_availability AS rta
     ON rta.room_type_id = rt.id
    AND rta.date >= $1::date
    AND rta.date < $2::date
 WHERE rt.hotel_id = $3
+  AND rt.is_active = true
+  AND  h.is_active = true
 GROUP BY rt.id
 HAVING
     rt.total_rooms
@@ -206,9 +241,14 @@ func (q *Queries) ListAvailableRoomTypes(ctx context.Context, arg ListAvailableR
 }
 
 const listRoomTypesByHotel = `-- name: ListRoomTypesByHotel :many
-SELECT id, hotel_id, name, description, price_per_night, capacity, total_rooms, created_at FROM room_types
-WHERE hotel_id = $1
-ORDER BY price_per_night
+SELECT rt.id, rt.hotel_id, rt.name, rt.description, rt.price_per_night, rt.capacity, rt.total_rooms, rt.is_active, rt.created_at
+FROM room_types AS rt
+JOIN hotels AS h
+    ON h.id = rt.hotel_id
+WHERE rt.hotel_id = $1
+  AND rt.is_active = true
+  AND h.is_active = true
+ORDER BY rt.price_per_night, rt.id
 `
 
 func (q *Queries) ListRoomTypesByHotel(ctx context.Context, hotelID int64) ([]RoomType, error) {
@@ -228,6 +268,7 @@ func (q *Queries) ListRoomTypesByHotel(ctx context.Context, hotelID int64) ([]Ro
 			&i.PricePerNight,
 			&i.Capacity,
 			&i.TotalRooms,
+			&i.IsActive,
 			&i.CreatedAt,
 		); err != nil {
 			return nil, err
@@ -249,7 +290,7 @@ SET
     capacity = $5,
     total_rooms = $6
 WHERE id = $1
-RETURNING id, hotel_id, name, description, price_per_night, capacity, total_rooms, created_at
+RETURNING id, hotel_id, name, description, price_per_night, capacity, total_rooms, is_active, created_at
 `
 
 type UpdateRoomTypeParams struct {
@@ -279,6 +320,7 @@ func (q *Queries) UpdateRoomType(ctx context.Context, arg UpdateRoomTypeParams) 
 		&i.PricePerNight,
 		&i.Capacity,
 		&i.TotalRooms,
+		&i.IsActive,
 		&i.CreatedAt,
 	)
 	return i, err

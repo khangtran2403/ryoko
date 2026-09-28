@@ -582,13 +582,17 @@ func (q *Queries) GetBookingIdempotencyKey(ctx context.Context, arg GetBookingId
 
 const getRoomTypeForBooking = `-- name: GetRoomTypeForBooking :one
 SELECT
-    id,
-    price_per_night,
-    capacity,
-    total_rooms
-FROM room_types
-WHERE id = $1
-FOR SHARE
+    rt.id,
+    rt.price_per_night,
+    rt.capacity,
+    rt.total_rooms
+FROM room_types AS rt
+JOIN hotels AS h
+    ON h.id = rt.hotel_id
+WHERE rt.id = $1
+  AND rt.is_active = true
+  AND h.is_active = true
+FOR SHARE OF h, rt
 `
 
 type GetRoomTypeForBookingRow struct {

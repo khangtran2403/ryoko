@@ -53,6 +53,7 @@ type Hotel struct {
 	Address     string             `json:"address"`
 	City        string             `json:"city"`
 	Description pgtype.Text        `json:"description"`
+	IsActive    bool               `json:"is_active"`
 	CreatedAt   pgtype.Timestamptz `json:"created_at"`
 }
 
@@ -88,6 +89,7 @@ type RoomType struct {
 	PricePerNight pgtype.Numeric     `json:"price_per_night"`
 	Capacity      int32              `json:"capacity"`
 	TotalRooms    int32              `json:"total_rooms"`
+	IsActive      bool               `json:"is_active"`
 	CreatedAt     pgtype.Timestamptz `json:"created_at"`
 }
 

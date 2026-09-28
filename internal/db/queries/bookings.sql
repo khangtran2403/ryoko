@@ -1,12 +1,16 @@
 -- name: GetRoomTypeForBooking :one
 SELECT
-    id,
-    price_per_night,
-    capacity,
-    total_rooms
-FROM room_types
-WHERE id = sqlc.arg(room_type_id)
-FOR SHARE;
+    rt.id,
+    rt.price_per_night,
+    rt.capacity,
+    rt.total_rooms
+FROM room_types AS rt
+JOIN hotels AS h
+    ON h.id = rt.hotel_id
+WHERE rt.id = sqlc.arg(room_type_id)
+  AND rt.is_active = true
+  AND h.is_active = true
+FOR SHARE OF h, rt;
 
 -- name: EnsureAvailabilityRows :exec
 INSERT INTO room_type_availability (

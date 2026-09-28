@@ -90,3 +90,18 @@ func (s *Service) UpdateRoomType(ctx context.Context, input UpdateRoomTypeReques
 	}
 	return update, nil
 }
+func (s *Service) DeactivateRoomType(ctx context.Context, roomTypeID int64) error {
+	if roomTypeID <= 0 {
+		return ErrInvalidID
+	}
+
+	_, err := s.queries.DeactivateRoomType(ctx, roomTypeID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ErrRoomTypeNotFound
+	}
+	if err != nil {
+		return fmt.Errorf("deactivate room type: %w", err)
+	}
+
+	return nil
+}

@@ -125,6 +125,78 @@ func TestUpdateRoomTypeReturnsNotFound(t *testing.T) {
 	}
 }
 
+func TestDeactivateRoomTypePreservesDataAndRemovesRoomTypeFromSale(t *testing.T) {
+	pool, service := newRoomTypeIntegrationService(t)
+	roomTypeID := insertRoomTypeFixture(t, pool, 10)
+	ctx := context.Background()
+
+	if _, err := pool.Exec(
+		ctx,
+		`INSERT INTO room_type_availability
+			(room_type_id, date, rooms_booked)
+		 VALUES ($1, CURRENT_DATE + 1, 2)`,
+		roomTypeID,
+	); err != nil {
+		t.Fatalf("insert inventory fixture: %v", err)
+	}
+
+	if err := service.DeactivateRoomType(ctx, roomTypeID); err != nil {
+		t.Fatalf("DeactivateRoomType() error = %v", err)
+	}
+
+	var isActive bool
+	var availabilityRows int64
+	if err := pool.QueryRow(
+		ctx,
+		`SELECT rt.is_active, count(rta.*)
+		 FROM room_types AS rt
+		 LEFT JOIN room_type_availability AS rta
+		   ON rta.room_type_id = rt.id
+		 WHERE rt.id = $1
+		 GROUP BY rt.id`,
+		roomTypeID,
+	).Scan(&isActive, &availabilityRows); err != nil {
+		t.Fatalf("read deactivated room type: %v", err)
+	}
+	if isActive {
+		t.Error("is_active = true, want false")
+	}
+	if availabilityRows != 1 {
+		t.Errorf("availability row count = %d, want 1", availabilityRows)
+	}
+
+	queries := sqlc.New(pool)
+	if _, err := queries.GetRoomTypeByID(ctx, roomTypeID); !errors.Is(err, pgx.ErrNoRows) {
+		t.Fatalf("GetRoomTypeByID() error = %v, want pgx.ErrNoRows", err)
+	}
+	if _, err := queries.GetRoomTypeForBooking(ctx, roomTypeID); !errors.Is(err, pgx.ErrNoRows) {
+		t.Fatalf("GetRoomTypeForBooking() error = %v, want pgx.ErrNoRows", err)
+	}
+
+	if err := service.DeactivateRoomType(ctx, roomTypeID); !errors.Is(err, ErrRoomTypeNotFound) {
+		t.Fatalf("second DeactivateRoomType() error = %v, want ErrRoomTypeNotFound", err)
+	}
+	_, err := service.UpdateRoomType(ctx, UpdateRoomTypeRequest{
+		ID:            roomTypeID,
+		Name:          "Inactive update",
+		PricePerNight: numericFromString(t, "1000000.00"),
+		Capacity:      2,
+		TotalRooms:    10,
+	})
+	if !errors.Is(err, ErrRoomTypeNotFound) {
+		t.Fatalf("UpdateRoomType() after deactivation error = %v, want ErrRoomTypeNotFound", err)
+	}
+}
+
+func TestDeactivateRoomTypeReturnsNotFound(t *testing.T) {
+	_, service := newRoomTypeIntegrationService(t)
+
+	err := service.DeactivateRoomType(context.Background(), 999999)
+	if !errors.Is(err, ErrRoomTypeNotFound) {
+		t.Fatalf("DeactivateRoomType() error = %v, want ErrRoomTypeNotFound", err)
+	}
+}
+
 func newRoomTypeIntegrationService(t *testing.T) (*pgxpool.Pool, *Service) {
 	t.Helper()
 	databaseURL := os.Getenv("TEST_DATABASE_URL")

@@ -16,3 +16,14 @@ func TestGetHotelDetailsByIDRejectsInvalidIDBeforeQuery(t *testing.T) {
 		}
 	}
 }
+
+func TestDeactivateHotelRejectsInvalidIDBeforeQuery(t *testing.T) {
+	service := &Service{}
+
+	for _, hotelID := range []int64{0, -1} {
+		err := service.DeactivateHotel(context.Background(), hotelID)
+		if !errors.Is(err, ErrInvalidHotelID) {
+			t.Errorf("DeactivateHotel(%d) error = %v, want ErrInvalidHotelID", hotelID, err)
+		}
+	}
+}

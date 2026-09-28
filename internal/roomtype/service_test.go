@@ -3,6 +3,7 @@ package roomtype
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 )
 
@@ -44,6 +45,20 @@ func TestUpdateRoomTypeValidatesBeforeStartingTransaction(t *testing.T) {
 			_, err := service.UpdateRoomType(context.Background(), tt.input)
 			if !errors.Is(err, tt.wantErr) {
 				t.Fatalf("UpdateRoomType() error = %v, want %v", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestDeactivateRoomTypeRejectsInvalidIDBeforeQuerying(t *testing.T) {
+	service := NewService(nil, nil)
+
+	for _, roomTypeID := range []int64{0, -1} {
+		roomTypeID := roomTypeID
+		t.Run(fmt.Sprintf("ID_%d", roomTypeID), func(t *testing.T) {
+			err := service.DeactivateRoomType(context.Background(), roomTypeID)
+			if !errors.Is(err, ErrInvalidID) {
+				t.Fatalf("DeactivateRoomType() error = %v, want ErrInvalidID", err)
 			}
 		})
 	}

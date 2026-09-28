@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/khangtran2403/ryoko/internal/db/sqlc"
 )
@@ -211,6 +212,97 @@ func TestGetHotelDetailsByIDReturnsEmptyCollections(t *testing.T) {
 	}
 	if details.ReviewSummary.ReviewCount != 0 {
 		t.Errorf("review count = %d, want 0", details.ReviewSummary.ReviewCount)
+	}
+}
+
+func TestDeactivateHotelPreservesChildrenAndRemovesHotelFromSale(t *testing.T) {
+	pool, service := newHotelIntegrationService(t)
+	ctx := context.Background()
+
+	var hotelID int64
+	if err := pool.QueryRow(
+		ctx,
+		`INSERT INTO hotels (name, address, city)
+		 VALUES ('Inactive Hotel', '1 Inactive Street', 'Hue')
+		 RETURNING id`,
+	).Scan(&hotelID); err != nil {
+		t.Fatalf("insert hotel: %v", err)
+	}
+
+	var roomTypeID int64
+	if err := pool.QueryRow(
+		ctx,
+		`INSERT INTO room_types
+			(hotel_id, name, price_per_night, capacity, total_rooms)
+		 VALUES ($1, 'Standard', 100.00, 2, 5)
+		 RETURNING id`,
+		hotelID,
+	).Scan(&roomTypeID); err != nil {
+		t.Fatalf("insert room type: %v", err)
+	}
+
+	if err := service.DeactivateHotel(ctx, hotelID); err != nil {
+		t.Fatalf("DeactivateHotel() error = %v", err)
+	}
+
+	var hotelActive bool
+	var roomTypeActive bool
+	if err := pool.QueryRow(
+		ctx,
+		`SELECT h.is_active, rt.is_active
+		 FROM hotels AS h
+		 JOIN room_types AS rt ON rt.hotel_id = h.id
+		 WHERE h.id = $1 AND rt.id = $2`,
+		hotelID,
+		roomTypeID,
+	).Scan(&hotelActive, &roomTypeActive); err != nil {
+		t.Fatalf("read preserved hotel and room type: %v", err)
+	}
+	if hotelActive {
+		t.Error("hotel is_active = true, want false")
+	}
+	if !roomTypeActive {
+		t.Error("room type is_active = false, want independently preserved true state")
+	}
+
+	if _, err := service.GetHotelDetailsByID(ctx, hotelID); !errors.Is(err, ErrHotelNotFound) {
+		t.Fatalf("GetHotelDetailsByID() error = %v, want ErrHotelNotFound", err)
+	}
+
+	queries := sqlc.New(pool)
+	if _, err := queries.GetRoomTypeByID(ctx, roomTypeID); !errors.Is(err, pgx.ErrNoRows) {
+		t.Fatalf("GetRoomTypeByID() error = %v, want pgx.ErrNoRows", err)
+	}
+	if _, err := queries.GetRoomTypeForBooking(ctx, roomTypeID); !errors.Is(err, pgx.ErrNoRows) {
+		t.Fatalf("GetRoomTypeForBooking() error = %v, want pgx.ErrNoRows", err)
+	}
+
+	var price pgtype.Numeric
+	if err := price.Scan("120.00"); err != nil {
+		t.Fatalf("parse price: %v", err)
+	}
+	_, err := queries.CreateRoomType(ctx, sqlc.CreateRoomTypeParams{
+		HotelID:       hotelID,
+		Name:          "Must Not Be Created",
+		PricePerNight: price,
+		Capacity:      2,
+		TotalRooms:    5,
+	})
+	if !errors.Is(err, pgx.ErrNoRows) {
+		t.Fatalf("CreateRoomType() error = %v, want pgx.ErrNoRows", err)
+	}
+
+	if err := service.DeactivateHotel(ctx, hotelID); !errors.Is(err, ErrHotelNotFound) {
+		t.Fatalf("second DeactivateHotel() error = %v, want ErrHotelNotFound", err)
+	}
+}
+
+func TestDeactivateHotelReturnsNotFound(t *testing.T) {
+	_, service := newHotelIntegrationService(t)
+
+	err := service.DeactivateHotel(context.Background(), 999999)
+	if !errors.Is(err, ErrHotelNotFound) {
+		t.Fatalf("DeactivateHotel() error = %v, want ErrHotelNotFound", err)
 	}
 }
 

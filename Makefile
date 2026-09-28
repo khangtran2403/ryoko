@@ -9,7 +9,7 @@ test-db-down:
 test-migrate:
 	migrate \
 		-path migrations \
-		-database "$(TEST_DB_URL)" \
+		-database "$(TEST_DATABASE_URL)" \
 		up
 
 test-integration:
