@@ -220,6 +220,7 @@ func TestHotelImageHandlerListHandlesInvalidIDAndError(t *testing.T) {
 	}{
 		{name: "invalid ID", path: "/hotels/nope/images", wantStatus: http.StatusBadRequest},
 		{name: "non-positive ID", path: "/hotels/0/images", wantStatus: http.StatusBadRequest},
+		{name: "hotel missing", path: "/hotels/12/images", err: hotelimages.ErrHotelNotFound, wantStatus: http.StatusNotFound, wantCalled: true},
 		{name: "unexpected", path: "/hotels/12/images", err: errors.New("database unavailable"), wantStatus: http.StatusInternalServerError, wantCalled: true},
 	}
 
@@ -335,6 +336,7 @@ func TestHotelImageHandlerDeleteHandlesInvalidIDsAndErrors(t *testing.T) {
 		{name: "non-positive hotel ID", path: "/hotels/0/images/91", wantStatus: http.StatusBadRequest},
 		{name: "invalid image ID", path: "/hotels/12/images/nope", wantStatus: http.StatusBadRequest},
 		{name: "non-positive image ID", path: "/hotels/12/images/0", wantStatus: http.StatusBadRequest},
+		{name: "hotel missing", path: "/hotels/12/images/91", err: hotelimages.ErrHotelNotFound, wantStatus: http.StatusNotFound, wantCalled: true},
 		{name: "image missing", path: "/hotels/12/images/91", err: hotelimages.ErrImageNotFound, wantStatus: http.StatusNotFound, wantCalled: true},
 		{name: "unexpected", path: "/hotels/12/images/91", err: errors.New("database unavailable"), wantStatus: http.StatusInternalServerError, wantCalled: true},
 	}

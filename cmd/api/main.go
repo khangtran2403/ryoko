@@ -14,6 +14,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/khangtran2403/ryoko/internal/admin_booking"
+	"github.com/khangtran2403/ryoko/internal/amenities"
 	"github.com/khangtran2403/ryoko/internal/auth"
 	"github.com/khangtran2403/ryoko/internal/booking"
 	"github.com/khangtran2403/ryoko/internal/config"
@@ -58,7 +59,8 @@ func main() {
 	hotelHandler := handler.NewHotelHandler(queries, hotelService)
 	roomTypeService := roomtype.NewService(pool, queries)
 	roomTypeHandler := handler.NewRoomTypeHandler(queries, roomTypeService)
-	amenityHandler := handler.NewAmenityHandler(queries)
+	amenityService := amenities.NewService(queries)
+	amenityHandler := handler.NewAmenityHandler(amenityService)
 	userHandler := handler.NewUserHandler(queries)
 	authHandler := handler.NewAuthHandler(queries, tokenManager)
 	authMiddleware := middleware.NewAuthMiddleware(tokenManager)
@@ -102,6 +104,8 @@ func main() {
 	mux.Handle("DELETE /room-types/{id}", adminOnly(roomTypeHandler.DeleteRoomType))
 	mux.HandleFunc("GET /hotels/{hotelID}/room-types", roomTypeHandler.ListRoomTypesByHotel)
 	mux.Handle("POST /amenities", adminOnly(amenityHandler.CreateAmenity))
+	mux.Handle("PUT /amenities/{amenityID}", adminOnly(amenityHandler.UpdateAmenity))
+	mux.Handle("DELETE /amenities/{amenityID}", adminOnly(amenityHandler.DeleteAmenity))
 	mux.HandleFunc("GET /amenities", amenityHandler.ListAmenities)
 	mux.Handle("POST /hotels/{hotelID}/amenities", adminOnly(amenityHandler.AddAmenityToHotel))
 	mux.HandleFunc("GET /hotels/{hotelID}/amenities", amenityHandler.ListAmenitiesByHotel)

@@ -22,24 +22,31 @@ func (q *Queries) ClearPrimaryHotelImage(ctx context.Context, hotelID int64) err
 }
 
 const createHotelImage = `-- name: CreateHotelImage :one
+WITH active_hotel AS (
+    SELECT h.id
+    FROM hotels AS h
+    WHERE h.id = $2
+      AND h.is_active = true
+    FOR SHARE OF h
+)
 INSERT INTO hotel_images (
     hotel_id,
     image_url
 )
-VALUES (
-    $1,
-    $2
-)
+SELECT
+    active_hotel.id,
+    $1::text
+FROM active_hotel
 RETURNING id, hotel_id, image_url, is_primary, created_at
 `
 
 type CreateHotelImageParams struct {
-	HotelID  int64  `json:"hotel_id"`
 	ImageUrl string `json:"image_url"`
+	HotelID  int64  `json:"hotel_id"`
 }
 
 func (q *Queries) CreateHotelImage(ctx context.Context, arg CreateHotelImageParams) (HotelImage, error) {
-	row := q.db.QueryRow(ctx, createHotelImage, arg.HotelID, arg.ImageUrl)
+	row := q.db.QueryRow(ctx, createHotelImage, arg.ImageUrl, arg.HotelID)
 	var i HotelImage
 	err := row.Scan(
 		&i.ID,
@@ -52,10 +59,18 @@ func (q *Queries) CreateHotelImage(ctx context.Context, arg CreateHotelImagePara
 }
 
 const deleteHotelImage = `-- name: DeleteHotelImage :one
-DELETE FROM hotel_images
-WHERE id = $1
-  AND hotel_id = $2
-RETURNING id
+WITH active_hotel AS (
+    SELECT h.id
+    FROM hotels AS h
+    WHERE h.id = $2
+      AND h.is_active = true
+    FOR SHARE OF h
+)
+DELETE FROM hotel_images AS hi
+USING active_hotel
+WHERE hi.id = $1
+  AND hi.hotel_id = active_hotel.id
+RETURNING hi.id
 `
 
 type DeleteHotelImageParams struct {
@@ -71,10 +86,16 @@ func (q *Queries) DeleteHotelImage(ctx context.Context, arg DeleteHotelImagePara
 }
 
 const listHotelImages = `-- name: ListHotelImages :many
-SELECT id, hotel_id, image_url, is_primary, created_at
-FROM hotel_images
-WHERE hotel_id = $1
-ORDER BY is_primary DESC, created_at ASC, id ASC
+SELECT hi.id, hi.hotel_id, hi.image_url, hi.is_primary, hi.created_at
+FROM hotel_images AS hi
+JOIN hotels AS h
+    ON h.id = hi.hotel_id
+WHERE hi.hotel_id = $1
+  AND h.is_active = true
+ORDER BY
+    hi.is_primary DESC,
+    hi.created_at ASC,
+    hi.id ASC
 `
 
 func (q *Queries) ListHotelImages(ctx context.Context, hotelID int64) ([]HotelImage, error) {
@@ -107,6 +128,7 @@ const lockHotelForImageUpdate = `-- name: LockHotelForImageUpdate :one
 SELECT id
 FROM hotels
 WHERE id = $1
+  AND is_active = true
 FOR UPDATE
 `
 

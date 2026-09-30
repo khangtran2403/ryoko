@@ -1,38 +1,46 @@
 package handler
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
 	"strconv"
 	"strings"
 
-	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/khangtran2403/ryoko/internal/amenities"
 	"github.com/khangtran2403/ryoko/internal/db/sqlc"
 )
 
+type amenityService interface {
+	CreateAmenity(ctx context.Context, name string) (sqlc.Amenity, error)
+	UpdateAmenity(ctx context.Context, amenityID int64, name string) (sqlc.Amenity, error)
+	DeleteAmenity(ctx context.Context, amenityID int64) error
+	ListAmenities(ctx context.Context) ([]sqlc.Amenity, error)
+	AddAmenityToHotel(ctx context.Context, hotelID int64, amenityID int64) (sqlc.HotelAmenity, error)
+	RemoveAmenityFromHotel(ctx context.Context, hotelID int64, amenityID int64) error
+	ListAmenitiesByHotel(ctx context.Context, hotelID int64) ([]sqlc.Amenity, error)
+}
 type AmenityHandler struct {
-	queries *sqlc.Queries
+	amenityService amenityService
 }
 
 type CreateAmenityRequest struct {
 	Name string `json:"name"`
 }
 
-type AttachAmenitytoHotelRequest struct {
+type AttachAmenityToHotelRequest struct {
 	AmenityID int64 `json:"amenity_id"`
 }
 
-func NewAmenityHandler(queries *sqlc.Queries) *AmenityHandler {
+func NewAmenityHandler(amenityService amenityService) *AmenityHandler {
 	return &AmenityHandler{
-		queries: queries,
+		amenityService: amenityService,
 	}
 }
 
 func (h *AmenityHandler) CreateAmenity(w http.ResponseWriter, r *http.Request) {
 	var req CreateAmenityRequest
-	var pgErr *pgconn.PgError
 
 	err := json.NewDecoder(r.Body).Decode(&req)
 	if err != nil {
@@ -45,8 +53,12 @@ func (h *AmenityHandler) CreateAmenity(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	c, err := h.queries.CreateAmenity(r.Context(), name)
-	if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+	c, err := h.amenityService.CreateAmenity(r.Context(), name)
+	if errors.Is(err, amenities.ErrInvalidAmenityName) {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if errors.Is(err, amenities.ErrAmenityNameConflict) {
 		http.Error(w, "Amenity name must be unique", http.StatusConflict)
 		return
 	}
@@ -58,8 +70,72 @@ func (h *AmenityHandler) CreateAmenity(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusCreated)
 	json.NewEncoder(w).Encode(c)
 }
+
+func (h *AmenityHandler) UpdateAmenity(w http.ResponseWriter, r *http.Request) {
+	amenityID, err := strconv.ParseInt(r.PathValue("amenityID"), 10, 64)
+	if err != nil || amenityID <= 0 {
+		http.Error(w, "Invalid amenity ID", http.StatusBadRequest)
+		return
+	}
+
+	var req CreateAmenityRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid request body", http.StatusBadRequest)
+		return
+	}
+	name := strings.TrimSpace(req.Name)
+	if name == "" {
+		http.Error(w, "Amenity name is required", http.StatusBadRequest)
+		return
+	}
+
+	updated, err := h.amenityService.UpdateAmenity(r.Context(), amenityID, name)
+	switch {
+	case errors.Is(err, amenities.ErrInvalidAmenityID),
+		errors.Is(err, amenities.ErrInvalidAmenityName):
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	case errors.Is(err, amenities.ErrAmenityNotFound):
+		http.Error(w, "Amenity not found", http.StatusNotFound)
+		return
+	case errors.Is(err, amenities.ErrAmenityNameConflict):
+		http.Error(w, "Amenity name must be unique", http.StatusConflict)
+		return
+	case err != nil:
+		http.Error(w, "Failed to update amenity", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(updated)
+}
+
+func (h *AmenityHandler) DeleteAmenity(w http.ResponseWriter, r *http.Request) {
+	amenityID, err := strconv.ParseInt(r.PathValue("amenityID"), 10, 64)
+	if err != nil || amenityID <= 0 {
+		http.Error(w, "Invalid amenity ID", http.StatusBadRequest)
+		return
+	}
+
+	err = h.amenityService.DeleteAmenity(r.Context(), amenityID)
+	switch {
+	case errors.Is(err, amenities.ErrInvalidAmenityID):
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	case errors.Is(err, amenities.ErrAmenityNotFound):
+		http.Error(w, "Amenity not found", http.StatusNotFound)
+		return
+	case err != nil:
+		http.Error(w, "Failed to delete amenity", http.StatusInternalServerError)
+		return
+	}
+
+	w.WriteHeader(http.StatusNoContent)
+}
+
 func (h *AmenityHandler) ListAmenities(w http.ResponseWriter, r *http.Request) {
-	amenities, err := h.queries.ListAmenities(r.Context())
+	amenities, err := h.amenityService.ListAmenities(r.Context())
 	if err != nil {
 		http.Error(w, "Failed to list amenities", http.StatusInternalServerError)
 		return
@@ -69,8 +145,7 @@ func (h *AmenityHandler) ListAmenities(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(amenities)
 }
 func (h *AmenityHandler) AddAmenityToHotel(w http.ResponseWriter, r *http.Request) {
-	var req AttachAmenitytoHotelRequest
-	var pgErr *pgconn.PgError
+	var req AttachAmenityToHotelRequest
 
 	err := json.NewDecoder(r.Body).Decode(&req)
 	if err != nil {
@@ -87,23 +162,23 @@ func (h *AmenityHandler) AddAmenityToHotel(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	convHotelID, err := strconv.ParseInt(getHotelid, 10, 64)
-	if err != nil {
+	if err != nil || convHotelID <= 0 {
 		http.Error(w, "Invalid hotel ID", http.StatusBadRequest)
 		return
 	}
-	addAmenity, err := h.queries.AddAmenityToHotel(r.Context(), sqlc.AddAmenityToHotelParams{
-		HotelID:   convHotelID,
-		AmenityID: req.AmenityID,
-	})
-	if errors.As(err, &pgErr) {
-		switch pgErr.Code {
-		case "23503":
-			http.Error(w, "Hotel or amenity not found", http.StatusNotFound)
-			return
-		case "23505":
-			http.Error(w, "Amenity already added to hotel", http.StatusConflict)
-			return
-		}
+	addAmenity, err := h.amenityService.AddAmenityToHotel(r.Context(), convHotelID, req.AmenityID)
+	if errors.Is(err, amenities.ErrInvalidHotelID) || errors.Is(err, amenities.ErrInvalidAmenityID) {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if errors.Is(err, amenities.ErrHotelOrAmenityNotFound) {
+		http.Error(w, "Hotel or amenity not found", http.StatusNotFound)
+		return
+	}
+	if errors.Is(err, amenities.ErrAmenityAlreadyAdded) {
+		http.Error(w, "Amenity already added to hotel", http.StatusConflict)
+		return
+
 	}
 	if err != nil {
 		http.Error(w, "Failed to add amenity to hotel", http.StatusInternalServerError)
@@ -120,7 +195,7 @@ func (h *AmenityHandler) RemoveAmenitiesFromHotel(w http.ResponseWriter, r *http
 		return
 	}
 	convAmenityID, err := strconv.ParseInt(getAmenityID, 10, 64)
-	if err != nil {
+	if err != nil || convAmenityID <= 0 {
 		http.Error(w, "Invalid amenity ID", http.StatusBadRequest)
 		return
 	}
@@ -130,15 +205,16 @@ func (h *AmenityHandler) RemoveAmenitiesFromHotel(w http.ResponseWriter, r *http
 		return
 	}
 	convHotelID, err := strconv.ParseInt(getHotelid, 10, 64)
-	if err != nil {
+	if err != nil || convHotelID <= 0 {
 		http.Error(w, "Invalid hotel ID", http.StatusBadRequest)
 		return
 	}
-	_, err = h.queries.RemoveAmenityFromHotel(r.Context(), sqlc.RemoveAmenityFromHotelParams{
-		HotelID:   convHotelID,
-		AmenityID: convAmenityID,
-	})
-	if errors.Is(err, pgx.ErrNoRows) {
+	err = h.amenityService.RemoveAmenityFromHotel(r.Context(), convHotelID, convAmenityID)
+	if errors.Is(err, amenities.ErrInvalidHotelID) || errors.Is(err, amenities.ErrInvalidAmenityID) {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if errors.Is(err, amenities.ErrHotelOrAmenityNotFound) {
 		http.Error(w, "Hotel or Amenity not found", http.StatusNotFound)
 		return
 	}
@@ -155,16 +231,20 @@ func (h *AmenityHandler) ListAmenitiesByHotel(w http.ResponseWriter, r *http.Req
 		return
 	}
 	convHotelID, err := strconv.ParseInt(getHotelid, 10, 64)
-	if err != nil {
+	if err != nil || convHotelID <= 0 {
 		http.Error(w, "Invalid hotel ID", http.StatusBadRequest)
 		return
 	}
-	amenities, err := h.queries.ListAmenitiesByHotel(r.Context(), convHotelID)
+	list, err := h.amenityService.ListAmenitiesByHotel(r.Context(), convHotelID)
+	if errors.Is(err, amenities.ErrHotelNotFound) {
+		http.Error(w, "Hotel not found", http.StatusNotFound)
+		return
+	}
 	if err != nil {
 		http.Error(w, "Failed to list amenities", http.StatusInternalServerError)
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(amenities)
+	json.NewEncoder(w).Encode(list)
 }

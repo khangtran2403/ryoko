@@ -7,7 +7,6 @@ import (
 	"strings"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/khangtran2403/ryoko/internal/db/sqlc"
 )
@@ -44,9 +43,8 @@ func (s *Service) CreateHotelImage(ctx context.Context, hotelID int64, imageURL 
 		HotelID:  hotelID,
 		ImageUrl: imageURL,
 	})
-	var pgErr *pgconn.PgError
 
-	if errors.As(err, &pgErr) && pgErr.Code == "23503" {
+	if errors.Is(err, pgx.ErrNoRows) {
 		return sqlc.HotelImage{}, ErrHotelNotFound
 	}
 	if err != nil {
@@ -58,7 +56,14 @@ func (s *Service) ListHotelImages(ctx context.Context, hotelID int64) ([]sqlc.Ho
 	if hotelID <= 0 {
 		return nil, ErrInvalidHotelID
 	}
-	listImages, err := s.queries.ListHotelImages(ctx, hotelID)
+	getHotel, err := s.queries.GetHotelByID(ctx, hotelID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrHotelNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("get hotel: %w", err)
+	}
+	listImages, err := s.queries.ListHotelImages(ctx, getHotel.ID)
 	if err != nil {
 		return nil, fmt.Errorf("list images: %w", err)
 
@@ -122,7 +127,24 @@ func (s *Service) DeleteHotelImage(ctx context.Context, hotelID, imageID int64) 
 	if imageID <= 0 {
 		return ErrInvalidImageID
 	}
-	_, err := s.queries.DeleteHotelImage(ctx, sqlc.DeleteHotelImageParams{
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{
+		IsoLevel: pgx.ReadCommitted,
+	})
+	if err != nil {
+		return fmt.Errorf("begin transaction %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	qtx := s.queries.WithTx(tx)
+
+	_, err = qtx.LockHotelForImageUpdate(ctx, hotelID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ErrHotelNotFound
+	}
+	if err != nil {
+		return fmt.Errorf("lock hotel row %w", err)
+	}
+	_, err = qtx.DeleteHotelImage(ctx, sqlc.DeleteHotelImageParams{
 		ImageID: imageID,
 		HotelID: hotelID,
 	})
@@ -131,6 +153,12 @@ func (s *Service) DeleteHotelImage(ctx context.Context, hotelID, imageID int64) 
 	}
 	if err != nil {
 		return fmt.Errorf("delete image:%w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf(
+			"commit transaction: %w",
+			err,
+		)
 	}
 	return nil
 }

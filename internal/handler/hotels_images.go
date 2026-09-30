@@ -80,6 +80,10 @@ func (h *HotelImageHandler) ListHotelImages(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	list, err := h.service.ListHotelImages(r.Context(), convID)
+	if errors.Is(err, hotel_images.ErrHotelNotFound) {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
 	if err != nil {
 		http.Error(w, "list hotel images failed", http.StatusInternalServerError)
 		return
@@ -146,13 +150,16 @@ func (h *HotelImageHandler) DeleteHotelImage(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	err = h.service.DeleteHotelImage(r.Context(), convID, imgconvID)
-	if errors.Is(err, hotel_images.ErrImageNotFound) {
-		http.Error(w, "image not found", http.StatusNotFound)
+	switch {
+	case errors.Is(err, hotel_images.ErrHotelNotFound),
+		errors.Is(err, hotel_images.ErrImageNotFound):
+		http.Error(w, "Hotel or image not found", http.StatusNotFound)
 		return
-	}
-	if err != nil {
+	case err != nil:
 		http.Error(w, "delete hotel image failed", http.StatusInternalServerError)
 		return
+
+	default:
+		w.WriteHeader(http.StatusNoContent)
 	}
-	w.WriteHeader(http.StatusNoContent)
 }

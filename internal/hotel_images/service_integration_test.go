@@ -162,6 +162,9 @@ func TestHotelImageMutationsAreScopedToHotel(t *testing.T) {
 func TestHotelImageServiceMapsMissingResources(t *testing.T) {
 	pool, service := newHotelImageIntegrationService(t)
 
+	if _, err := service.ListHotelImages(context.Background(), 999999); !errors.Is(err, ErrHotelNotFound) {
+		t.Fatalf("ListHotelImages() error = %v, want ErrHotelNotFound", err)
+	}
 	_, err := service.CreateHotelImage(
 		context.Background(),
 		999999,
@@ -174,6 +177,9 @@ func TestHotelImageServiceMapsMissingResources(t *testing.T) {
 	if !errors.Is(err, ErrHotelNotFound) {
 		t.Fatalf("SetPrimaryHotelImage() error = %v, want ErrHotelNotFound", err)
 	}
+	if err := service.DeleteHotelImage(context.Background(), 999999, 999999); !errors.Is(err, ErrHotelNotFound) {
+		t.Fatalf("DeleteHotelImage() error = %v, want ErrHotelNotFound", err)
+	}
 
 	hotelID := insertHotelImageHotel(t, pool, "Delete Hotel")
 	image := createHotelImageFixture(t, service, hotelID, "https://example.com/delete.jpg")
@@ -182,6 +188,73 @@ func TestHotelImageServiceMapsMissingResources(t *testing.T) {
 	}
 	if err := service.DeleteHotelImage(context.Background(), hotelID, image.ID); !errors.Is(err, ErrImageNotFound) {
 		t.Fatalf("second DeleteHotelImage() error = %v, want ErrImageNotFound", err)
+	}
+}
+
+func TestHotelImageServiceRejectsInactiveHotels(t *testing.T) {
+	pool, service := newHotelImageIntegrationService(t)
+	hotelID := insertHotelImageHotel(t, pool, "Inactive Image Hotel")
+	image := createHotelImageFixture(t, service, hotelID, "https://example.com/inactive.jpg")
+
+	if _, err := pool.Exec(
+		context.Background(),
+		"UPDATE hotels SET is_active = false WHERE id = $1",
+		hotelID,
+	); err != nil {
+		t.Fatalf("deactivate hotel: %v", err)
+	}
+
+	tests := []struct {
+		name string
+		call func() error
+	}{
+		{
+			name: "create image",
+			call: func() error {
+				_, err := service.CreateHotelImage(context.Background(), hotelID, "https://example.com/new.jpg")
+				return err
+			},
+		},
+		{
+			name: "list images",
+			call: func() error {
+				_, err := service.ListHotelImages(context.Background(), hotelID)
+				return err
+			},
+		},
+		{
+			name: "set primary image",
+			call: func() error {
+				_, err := service.SetPrimaryHotelImage(context.Background(), hotelID, image.ID)
+				return err
+			},
+		},
+		{
+			name: "delete image",
+			call: func() error {
+				return service.DeleteHotelImage(context.Background(), hotelID, image.ID)
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if err := tt.call(); !errors.Is(err, ErrHotelNotFound) {
+				t.Fatalf("error = %v, want ErrHotelNotFound", err)
+			}
+		})
+	}
+
+	var imageStillExists bool
+	if err := pool.QueryRow(
+		context.Background(),
+		"SELECT EXISTS (SELECT 1 FROM hotel_images WHERE id = $1)",
+		image.ID,
+	).Scan(&imageStillExists); err != nil {
+		t.Fatalf("check preserved image: %v", err)
+	}
+	if !imageStillExists {
+		t.Error("inactive-hotel mutation deleted the existing image")
 	}
 }
 

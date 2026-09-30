@@ -10,9 +10,30 @@ import (
 )
 
 const addAmenityToHotel = `-- name: AddAmenityToHotel :one
-INSERT INTO hotel_amenities (hotel_id, amenity_id)
-VALUES ($1, $2)
-RETURNING hotel_id, amenity_id
+WITH active_hotel AS (
+    SELECT h.id
+    FROM hotels AS h
+    WHERE h.id = $1
+      AND h.is_active = true
+    FOR SHARE OF h
+),
+requested_amenity AS (
+    SELECT a.id
+    FROM amenities AS a
+    WHERE a.id = $2
+)
+INSERT INTO hotel_amenities (
+    hotel_id,
+    amenity_id
+)
+SELECT
+    active_hotel.id,
+    requested_amenity.id
+FROM active_hotel
+CROSS JOIN requested_amenity
+RETURNING
+    hotel_id,
+    amenity_id
 `
 
 type AddAmenityToHotelParams struct {
@@ -30,7 +51,10 @@ func (q *Queries) AddAmenityToHotel(ctx context.Context, arg AddAmenityToHotelPa
 const createAmenity = `-- name: CreateAmenity :one
 INSERT INTO amenities (name)
 VALUES ($1)
-RETURNING id, name, created_at
+RETURNING
+    id,
+    name,
+    created_at
 `
 
 func (q *Queries) CreateAmenity(ctx context.Context, name string) (Amenity, error) {
@@ -40,8 +64,24 @@ func (q *Queries) CreateAmenity(ctx context.Context, name string) (Amenity, erro
 	return i, err
 }
 
+const deleteAmenity = `-- name: DeleteAmenity :one
+DELETE FROM amenities
+WHERE id = $1
+RETURNING id
+`
+
+func (q *Queries) DeleteAmenity(ctx context.Context, amenityID int64) (int64, error) {
+	row := q.db.QueryRow(ctx, deleteAmenity, amenityID)
+	var id int64
+	err := row.Scan(&id)
+	return id, err
+}
+
 const listAmenities = `-- name: ListAmenities :many
-SELECT id, name, created_at
+SELECT
+    id,
+    name,
+    created_at
 FROM amenities
 ORDER BY name
 `
@@ -74,8 +114,11 @@ SELECT
 FROM amenities AS a
 JOIN hotel_amenities AS ha
     ON ha.amenity_id = a.id
+JOIN hotels AS h
+    ON h.id = ha.hotel_id
 WHERE ha.hotel_id = $1
-ORDER BY a.name
+  AND h.is_active = true
+ORDER BY a.name, a.id
 `
 
 func (q *Queries) ListAmenitiesByHotel(ctx context.Context, hotelID int64) ([]Amenity, error) {
@@ -99,20 +142,50 @@ func (q *Queries) ListAmenitiesByHotel(ctx context.Context, hotelID int64) ([]Am
 }
 
 const removeAmenityFromHotel = `-- name: RemoveAmenityFromHotel :one
-DELETE FROM hotel_amenities
-WHERE hotel_id = $1
-  AND amenity_id = $2
-RETURNING amenity_id
+WITH active_hotel AS (
+    SELECT h.id
+    FROM hotels AS h
+    WHERE h.id = $2
+      AND h.is_active = true
+    FOR SHARE OF h
+)
+DELETE FROM hotel_amenities AS ha
+USING active_hotel
+WHERE ha.hotel_id = active_hotel.id
+  AND ha.amenity_id = $1
+RETURNING ha.amenity_id
 `
 
 type RemoveAmenityFromHotelParams struct {
-	HotelID   int64 `json:"hotel_id"`
 	AmenityID int64 `json:"amenity_id"`
+	HotelID   int64 `json:"hotel_id"`
 }
 
 func (q *Queries) RemoveAmenityFromHotel(ctx context.Context, arg RemoveAmenityFromHotelParams) (int64, error) {
-	row := q.db.QueryRow(ctx, removeAmenityFromHotel, arg.HotelID, arg.AmenityID)
+	row := q.db.QueryRow(ctx, removeAmenityFromHotel, arg.AmenityID, arg.HotelID)
 	var amenity_id int64
 	err := row.Scan(&amenity_id)
 	return amenity_id, err
+}
+
+const updateAmenity = `-- name: UpdateAmenity :one
+UPDATE amenities
+SET name = $1
+WHERE id = $2
+RETURNING
+    id,
+    name,
+    created_at
+`
+
+type UpdateAmenityParams struct {
+	Name      string `json:"name"`
+	AmenityID int64  `json:"amenity_id"`
+}
+
+func (q *Queries) UpdateAmenity(ctx context.Context, arg UpdateAmenityParams) (Amenity, error) {
+	row := q.db.QueryRow(ctx, updateAmenity, arg.Name, arg.AmenityID)
+	var i Amenity
+	err := row.Scan(&i.ID, &i.Name, &i.CreatedAt)
+	return i, err
 }
