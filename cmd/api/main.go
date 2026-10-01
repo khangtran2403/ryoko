@@ -26,6 +26,7 @@ import (
 	"github.com/khangtran2403/ryoko/internal/middleware"
 	"github.com/khangtran2403/ryoko/internal/review"
 	"github.com/khangtran2403/ryoko/internal/roomtype"
+	"github.com/khangtran2403/ryoko/internal/session"
 )
 
 func main() {
@@ -50,7 +51,7 @@ func main() {
 		cfg.JWT.Secret,
 		"ryoko",
 		"ryoko-api",
-		15*time.Minute,
+		cfg.JWT.AccessTTL,
 	)
 	if err != nil {
 		log.Fatalf("invalid token configuration: %v", err)
@@ -62,13 +63,22 @@ func main() {
 	amenityService := amenities.NewService(queries)
 	amenityHandler := handler.NewAmenityHandler(amenityService)
 	userHandler := handler.NewUserHandler(queries)
-	authHandler := handler.NewAuthHandler(queries, tokenManager)
+	sessionService, err := session.NewService(pool, queries, tokenManager, cfg.JWT.RefreshTTL)
+	if err != nil {
+		log.Fatalf("create session service: %v", err)
+	}
+	authHandler := handler.NewAuthHandler(queries, sessionService)
 	authMiddleware := middleware.NewAuthMiddleware(tokenManager)
 	bookingService := booking.NewService(pool, queries)
 	newAdminBookingService := admin_booking.NewService(queries)
 	completionWorker := booking.NewCompletionWorker(
 		bookingService,
 		time.Hour,
+		log.Default(),
+	)
+	sessionCleanupWorker := session.NewCleanupWorker(
+		sessionService,
+		cfg.JWT.CleanupInterval,
 		log.Default(),
 	)
 	bookingHandler := handler.NewBookingHandler(bookingService)
@@ -194,6 +204,8 @@ func main() {
 	mux.HandleFunc("GET /hotels/search", bookingHandler.SearchAvailableHotels)
 	mux.HandleFunc("POST /auth/register", authHandler.RegisterUser)
 	mux.HandleFunc("POST /auth/login", authHandler.LoginUser)
+	mux.HandleFunc("POST /auth/refresh", authHandler.RefreshToken)
+	mux.HandleFunc("POST /auth/logout", authHandler.Logout)
 
 	addr := ":" + strconv.Itoa(cfg.API.Port)
 
@@ -206,10 +218,14 @@ func main() {
 
 	var workerWG sync.WaitGroup
 
-	workerWG.Add(1)
+	workerWG.Add(2)
 	go func() {
 		defer workerWG.Done()
 		completionWorker.Run(appCtx)
+	}()
+	go func() {
+		defer workerWG.Done()
+		sessionCleanupWorker.Run(appCtx)
 	}()
 
 	serverErrors := make(chan error, 1)

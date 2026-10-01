@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"time"
 
 	"github.com/joho/godotenv"
 )
@@ -31,7 +32,10 @@ type Config struct {
 		GoogleIntegrationRedirectURL string
 	}
 	JWT struct {
-		Secret string
+		Secret          string
+		AccessTTL       time.Duration
+		RefreshTTL      time.Duration
+		CleanupInterval time.Duration
 	}
 	EncryptionKey string
 	Environment   string
@@ -54,6 +58,18 @@ func Load() (*Config, error) {
 	if len([]byte(jwtSecret)) < 32 {
 		return nil, fmt.Errorf("JWT_SECRET must contain at least 32 bytes")
 	}
+	accessTTL, err := getEnvDuration("ACCESS_TOKEN_TTL_MINUTES", 15, "m")
+	if err != nil {
+		return nil, fmt.Errorf("invalid ACCESS_TOKEN_TTL_MINUTES: %w", err)
+	}
+	refreshTTL, err := getEnvDuration("REFRESH_TOKEN_TTL_HOURS", 720, "h")
+	if err != nil {
+		return nil, fmt.Errorf("invalid REFRESH_TOKEN_TTL_HOURS: %w", err)
+	}
+	cleanupInterval, err := getEnvDuration("REFRESH_TOKEN_CLEANUP_INTERVAL_HOURS", 24, "h")
+	if err != nil {
+		return nil, fmt.Errorf("invalid REFRESH_TOKEN_CLEANUP_INTERVAL_HOURS: %w", err)
+	}
 
 	cfg = &Config{
 		Database: struct {
@@ -67,9 +83,15 @@ func Load() (*Config, error) {
 			Port: port,
 		},
 		JWT: struct {
-			Secret string
+			Secret          string
+			AccessTTL       time.Duration
+			RefreshTTL      time.Duration
+			CleanupInterval time.Duration
 		}{
-			Secret: jwtSecret,
+			Secret:          jwtSecret,
+			AccessTTL:       accessTTL,
+			RefreshTTL:      refreshTTL,
+			CleanupInterval: cleanupInterval,
 		},
 		Environment: getEnv("ENV", "development"),
 	}
@@ -98,4 +120,16 @@ func getEnvInt(key string, defaultVal int) (int, error) {
 		return 0, fmt.Errorf("%s=%q is not a valid integer", key, val)
 	}
 	return intVal, nil
+}
+
+func getEnvDuration(key string, defaultValue int, unit string) (time.Duration, error) {
+	raw := getEnv(key, strconv.Itoa(defaultValue))
+	duration, err := time.ParseDuration(raw + unit)
+	if err != nil {
+		return 0, fmt.Errorf("%s=%q is not a valid duration: %w", key, raw, err)
+	}
+	if duration <= 0 {
+		return 0, fmt.Errorf("%s must be positive", key)
+	}
+	return duration, nil
 }

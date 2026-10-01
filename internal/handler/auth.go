@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -11,11 +12,24 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/khangtran2403/ryoko/internal/auth"
 	"github.com/khangtran2403/ryoko/internal/db/sqlc"
+	"github.com/khangtran2403/ryoko/internal/session"
 )
 
+type authSessionService interface {
+	IssueTokenPair(ctx context.Context, userID int64, role string) (session.TokenPair, error)
+
+	RotateTokenPair(ctx context.Context, rawRefreshToken string) (session.TokenPair, error)
+	RevokeRefreshToken(ctx context.Context, rawRefreshToken string) error
+}
+
+type authQueries interface {
+	RegisterUser(ctx context.Context, arg sqlc.RegisterUserParams) (sqlc.RegisterUserRow, error)
+	GetUserForLogin(ctx context.Context, email string) (sqlc.GetUserForLoginRow, error)
+}
+
 type AuthHandler struct {
-	queries *sqlc.Queries
-	tokens  *auth.TokenManager
+	queries        authQueries
+	sessionService authSessionService
 }
 
 type RegisterRequest struct {
@@ -29,17 +43,21 @@ type LoginRequest struct {
 	Email    string `json:"email"`
 	Password string `json:"password"`
 }
-
+type RefreshRequest struct {
+	RefreshToken string `json:"refresh_token"`
+}
 type LoginResponse struct {
-	AccessToken string `json:"access_token"`
-	TokenType   string `json:"token_type"`
-	ExpiresIn   int64  `json:"expires_in"`
+	AccessToken      string    `json:"access_token"`
+	RefreshToken     string    `json:"refresh_token"`
+	TokenType        string    `json:"token_type"`
+	ExpiresIn        int64     `json:"expires_in"`
+	RefreshExpiresAt time.Time `json:"refresh_expires_at"`
 }
 
-func NewAuthHandler(queries *sqlc.Queries, tokens *auth.TokenManager) *AuthHandler {
+func NewAuthHandler(queries authQueries, sessionService authSessionService) *AuthHandler {
 	return &AuthHandler{
-		queries: queries,
-		tokens:  tokens,
+		queries:        queries,
+		sessionService: sessionService,
 	}
 }
 
@@ -121,15 +139,77 @@ func (h *AuthHandler) LoginUser(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Invalid email or password", http.StatusUnauthorized)
 		return
 	}
-	token, err := h.tokens.GenerateToken(user.ID, user.Role)
+	token, err := h.sessionService.IssueTokenPair(r.Context(), user.ID, user.Role)
 	if err != nil {
 		http.Error(w, "Failed to generate token", http.StatusInternalServerError)
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(LoginResponse{
-		AccessToken: token,
-		TokenType:   "Bearer",
-		ExpiresIn:   int64(h.tokens.TTL() / time.Second),
+		AccessToken:      token.AccessToken,
+		RefreshToken:     token.RefreshToken,
+		TokenType:        "Bearer",
+		ExpiresIn:        token.AccessExpiresIn,
+		RefreshExpiresAt: token.RefreshExpiresAt,
 	})
+}
+func (h *AuthHandler) RefreshToken(w http.ResponseWriter, r *http.Request) {
+	var req RefreshRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid request body", http.StatusBadRequest)
+		return
+	}
+	req.RefreshToken = strings.TrimSpace(req.RefreshToken)
+	if req.RefreshToken == "" {
+		http.Error(w, "Refresh token is required", http.StatusBadRequest)
+		return
+	}
+	token, err := h.sessionService.RotateTokenPair(r.Context(), req.RefreshToken)
+	switch {
+	case errors.Is(err, session.ErrInvalidRefreshToken),
+		errors.Is(err, session.ErrRefreshTokenExpired),
+		errors.Is(err, session.ErrRefreshTokenRevoked),
+		errors.Is(err, session.ErrRefreshTokenReused):
+		http.Error(w, "Invalid refresh token", http.StatusUnauthorized)
+		return
+
+	case err != nil:
+		http.Error(w, "Failed to refresh token", http.StatusInternalServerError)
+		return
+
+	default:
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(LoginResponse{
+			AccessToken:      token.AccessToken,
+			RefreshToken:     token.RefreshToken,
+			TokenType:        "Bearer",
+			ExpiresIn:        token.AccessExpiresIn,
+			RefreshExpiresAt: token.RefreshExpiresAt,
+		})
+	}
+}
+
+func (h *AuthHandler) Logout(w http.ResponseWriter, r *http.Request) {
+	var req RefreshRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid request body", http.StatusBadRequest)
+		return
+	}
+	req.RefreshToken = strings.TrimSpace(req.RefreshToken)
+	if req.RefreshToken == "" {
+		http.Error(w, "Refresh token is required", http.StatusBadRequest)
+		return
+	}
+
+	err := h.sessionService.RevokeRefreshToken(r.Context(), req.RefreshToken)
+	if errors.Is(err, session.ErrInvalidRefreshToken) {
+		http.Error(w, "Invalid refresh token", http.StatusBadRequest)
+		return
+	}
+	if err != nil {
+		http.Error(w, "Failed to logout", http.StatusInternalServerError)
+		return
+	}
+
+	w.WriteHeader(http.StatusNoContent)
 }
