@@ -18,21 +18,36 @@ type Querier interface {
 	ClaimBookingIdempotencyKey(ctx context.Context, arg ClaimBookingIdempotencyKeyParams) (int64, error)
 	ClearPrimaryHotelImage(ctx context.Context, hotelID int64) error
 	CompletePastBookings(ctx context.Context, today pgtype.Date) (int64, error)
+	// Invalidates any previous OTP or verified reset token.
+	ConsumeActivePasswordResetRequests(ctx context.Context, arg ConsumeActivePasswordResetRequestsParams) (int64, error)
+	// Call after updating the password and revoking refresh sessions,
+	// within the same transaction.
+	ConsumePasswordResetRequest(ctx context.Context, arg ConsumePasswordResetRequestParams) (int64, error)
 	CreateAmenity(ctx context.Context, name string) (Amenity, error)
 	CreateBooking(ctx context.Context, arg CreateBookingParams) (Booking, error)
 	CreateBookingStatusHistory(ctx context.Context, arg CreateBookingStatusHistoryParams) (BookingStatusHistory, error)
 	CreateHotel(ctx context.Context, arg CreateHotelParams) (Hotel, error)
 	CreateHotelImage(ctx context.Context, arg CreateHotelImageParams) (HotelImage, error)
+	CreateOAuthAccount(ctx context.Context, arg CreateOAuthAccountParams) (OauthAccount, error)
+	CreatePasswordResetRequest(ctx context.Context, arg CreatePasswordResetRequestParams) (PasswordResetRequest, error)
+	CreateRefreshToken(ctx context.Context, arg CreateRefreshTokenParams) (RefreshToken, error)
 	CreateReviewForCompletedBooking(ctx context.Context, arg CreateReviewForCompletedBookingParams) (Review, error)
 	CreateRoomType(ctx context.Context, arg CreateRoomTypeParams) (RoomType, error)
 	DeactivateHotel(ctx context.Context, id int64) (int64, error)
 	DeactivateRoomType(ctx context.Context, id int64) (int64, error)
 	DecrementAvailability(ctx context.Context, arg DecrementAvailabilityParams) (int64, error)
 	DeleteAmenity(ctx context.Context, amenityID int64) (int64, error)
+	// Optional cleanup query for a future worker.
+	DeleteExpiredPasswordResetRequests(ctx context.Context) (int64, error)
+	DeleteExpiredRefreshTokens(ctx context.Context) (int64, error)
 	DeleteHotelImage(ctx context.Context, arg DeleteHotelImageParams) (int64, error)
 	DeleteReviewByUser(ctx context.Context, arg DeleteReviewByUserParams) (int64, error)
 	DeleteUser(ctx context.Context, id int64) (int64, error)
 	EnsureAvailabilityRows(ctx context.Context, arg EnsureAvailabilityRowsParams) error
+	// Call this only after locking the user row.
+	// Returning expired or exhausted requests lets the service map every
+	// invalid state to one public error.
+	GetActivePasswordResetRequestForUpdate(ctx context.Context, userID int64) (PasswordResetRequest, error)
 	GetBookingByIDForAdmin(ctx context.Context, bookingID int64) (Booking, error)
 	GetBookingByIDForUser(ctx context.Context, arg GetBookingByIDForUserParams) (Booking, error)
 	GetBookingForAdminCancellation(ctx context.Context, bookingID int64) (Booking, error)
@@ -40,7 +55,25 @@ type Querier interface {
 	GetBookingIdempotencyKey(ctx context.Context, arg GetBookingIdempotencyKeyParams) (GetBookingIdempotencyKeyRow, error)
 	GetHotelByID(ctx context.Context, id int64) (Hotel, error)
 	GetHotelReviewSummary(ctx context.Context, hotelID int64) (GetHotelReviewSummaryRow, error)
+	// Used to enforce the request cooldown.
+	GetLatestPasswordResetRequest(ctx context.Context, userID int64) (PasswordResetRequest, error)
 	GetMaxRoomTypeInventoryUsage(ctx context.Context, roomTypeID int64) (int32, error)
+	// Rechecked inside the account-linking transaction.
+	// Lock the OAuth account before changing its stored provider email.
+	GetOAuthAccountForUpdate(ctx context.Context, arg GetOAuthAccountForUpdateParams) (OauthAccount, error)
+	// Used for normal OAuth login after the identity has already been linked.
+	GetOAuthUserByProviderSubject(ctx context.Context, arg GetOAuthUserByProviderSubjectParams) (GetOAuthUserByProviderSubjectRow, error)
+	// Creates a passwordless customer when the email is new.
+	// If the verified Google email already belongs to a Ryoko user, this performs
+	// a no-op update and returns that existing user while locking its row.
+	//
+	// The conflict target matches users_email_unique_ci.
+	GetOrCreateOAuthUser(ctx context.Context, arg GetOrCreateOAuthUserParams) (GetOrCreateOAuthUserRow, error)
+	// First lookup for confirmation. The service should then lock the user
+	// and reload this request with GetPasswordResetRequestForUpdate.
+	GetPasswordResetRequestByTokenHash(ctx context.Context, resetTokenHash []byte) (PasswordResetRequest, error)
+	GetPasswordResetRequestForUpdate(ctx context.Context, id int64) (PasswordResetRequest, error)
+	GetRefreshTokenForUpdate(ctx context.Context, tokenHash []byte) (RefreshToken, error)
 	GetReviewByID(ctx context.Context, reviewID int64) (GetReviewByIDRow, error)
 	GetRoomTypeByID(ctx context.Context, id int64) (RoomType, error)
 	GetRoomTypeForBooking(ctx context.Context, roomTypeID int64) (GetRoomTypeForBookingRow, error)
@@ -48,6 +81,7 @@ type Querier interface {
 	GetUserByID(ctx context.Context, id int64) (GetUserByIDRow, error)
 	GetUserForLogin(ctx context.Context, lower string) (GetUserForLoginRow, error)
 	IncrementAvailability(ctx context.Context, arg IncrementAvailabilityParams) (int64, error)
+	IncrementPasswordResetAttempts(ctx context.Context, id int64) (int16, error)
 	ListAmenities(ctx context.Context) ([]Amenity, error)
 	ListAmenitiesByHotel(ctx context.Context, hotelID int64) ([]Amenity, error)
 	ListAvailableRoomTypes(ctx context.Context, arg ListAvailableRoomTypesParams) ([]ListAvailableRoomTypesRow, error)
@@ -62,16 +96,29 @@ type Querier interface {
 	ListRoomTypesByHotel(ctx context.Context, hotelID int64) ([]RoomType, error)
 	LockAvailabilityRows(ctx context.Context, arg LockAvailabilityRowsParams) ([]LockAvailabilityRowsRow, error)
 	LockHotelForImageUpdate(ctx context.Context, hotelID int64) (int64, error)
+	// Locking the user first gives request, verification, and confirmation
+	// transactions a consistent lock order.
+	LockUserForPasswordResetByEmail(ctx context.Context, email string) (LockUserForPasswordResetByEmailRow, error)
+	LockUserForPasswordResetByID(ctx context.Context, userID int64) (LockUserForPasswordResetByIDRow, error)
+	// Exchanges a correct OTP for a hashed opaque reset token.
+	MarkPasswordResetVerified(ctx context.Context, arg MarkPasswordResetVerifiedParams) (PasswordResetRequest, error)
+	MarkRefreshTokenReplaced(ctx context.Context, arg MarkRefreshTokenReplacedParams) (RefreshToken, error)
 	RegisterUser(ctx context.Context, arg RegisterUserParams) (RegisterUserRow, error)
 	RemoveAmenityFromHotel(ctx context.Context, arg RemoveAmenityFromHotelParams) (int64, error)
+	RevokeAllUserRefreshTokens(ctx context.Context, userID int64) (int64, error)
+	RevokeRefreshTokenByHash(ctx context.Context, tokenHash []byte) (int64, error)
 	SearchAvailableHotels(ctx context.Context, arg SearchAvailableHotelsParams) ([]SearchAvailableHotelsRow, error)
 	SetBlockedInventory(ctx context.Context, arg SetBlockedInventoryParams) (int64, error)
 	SetPrimaryHotelImage(ctx context.Context, arg SetPrimaryHotelImageParams) (HotelImage, error)
 	UpdateAmenity(ctx context.Context, arg UpdateAmenityParams) (Amenity, error)
 	UpdateHotel(ctx context.Context, arg UpdateHotelParams) (Hotel, error)
+	// Keep the provider-email snapshot current when Google reports a changed
+	// verified email. This does not automatically change users.email.
+	UpdateOAuthAccountEmail(ctx context.Context, arg UpdateOAuthAccountEmailParams) (OauthAccount, error)
 	UpdateReviewByUser(ctx context.Context, arg UpdateReviewByUserParams) (Review, error)
 	UpdateRoomType(ctx context.Context, arg UpdateRoomTypeParams) (RoomType, error)
 	UpdateUser(ctx context.Context, arg UpdateUserParams) (UpdateUserRow, error)
+	UpdateUserPasswordAfterReset(ctx context.Context, arg UpdateUserPasswordAfterResetParams) (int64, error)
 }
 
 var _ Querier = (*Queries)(nil)

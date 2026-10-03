@@ -70,6 +70,39 @@ type HotelImage struct {
 	CreatedAt pgtype.Timestamptz `json:"created_at"`
 }
 
+type OauthAccount struct {
+	ID             int64              `json:"id"`
+	UserID         int64              `json:"user_id"`
+	Provider       string             `json:"provider"`
+	ProviderUserID string             `json:"provider_user_id"`
+	ProviderEmail  string             `json:"provider_email"`
+	CreatedAt      pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt      pgtype.Timestamptz `json:"updated_at"`
+}
+
+type PasswordResetRequest struct {
+	ID                  int64              `json:"id"`
+	UserID              int64              `json:"user_id"`
+	OtpHash             []byte             `json:"otp_hash"`
+	Attempts            int16              `json:"attempts"`
+	ExpiresAt           pgtype.Timestamptz `json:"expires_at"`
+	VerifiedAt          pgtype.Timestamptz `json:"verified_at"`
+	ResetTokenHash      []byte             `json:"reset_token_hash"`
+	ResetTokenExpiresAt pgtype.Timestamptz `json:"reset_token_expires_at"`
+	ConsumedAt          pgtype.Timestamptz `json:"consumed_at"`
+	CreatedAt           pgtype.Timestamptz `json:"created_at"`
+}
+
+type RefreshToken struct {
+	ID                int64              `json:"id"`
+	UserID            int64              `json:"user_id"`
+	TokenHash         []byte             `json:"token_hash"`
+	ExpiresAt         pgtype.Timestamptz `json:"expires_at"`
+	RevokedAt         pgtype.Timestamptz `json:"revoked_at"`
+	ReplacedByTokenID pgtype.Int8        `json:"replaced_by_token_id"`
+	CreatedAt         pgtype.Timestamptz `json:"created_at"`
+}
+
 type Review struct {
 	ID        int64              `json:"id"`
 	BookingID int64              `json:"booking_id"`

@@ -23,7 +23,10 @@ import (
 	"github.com/khangtran2403/ryoko/internal/hotel"
 	hotelimages "github.com/khangtran2403/ryoko/internal/hotel_images"
 	"github.com/khangtran2403/ryoko/internal/inventory"
+	"github.com/khangtran2403/ryoko/internal/mailer"
 	"github.com/khangtran2403/ryoko/internal/middleware"
+	"github.com/khangtran2403/ryoko/internal/oauth"
+	"github.com/khangtran2403/ryoko/internal/passwordreset"
 	"github.com/khangtran2403/ryoko/internal/review"
 	"github.com/khangtran2403/ryoko/internal/roomtype"
 	"github.com/khangtran2403/ryoko/internal/session"
@@ -68,6 +71,59 @@ func main() {
 		log.Fatalf("create session service: %v", err)
 	}
 	authHandler := handler.NewAuthHandler(queries, sessionService)
+	googleIDTokenValidator := oauth.NewGoogleIDTokenValidator(nil)
+	googleProvider, err := oauth.NewGoogleProvider(
+		cfg.GoogleOAuth.ClientID,
+		cfg.GoogleOAuth.ClientSecret,
+		cfg.GoogleOAuth.RedirectURL,
+		googleIDTokenValidator,
+	)
+	if err != nil {
+		log.Fatalf("create Google OAuth provider: %v", err)
+	}
+	oauthCookies, err := oauth.NewFlowCookieManager(
+		cfg.OAuth.CookieSecret,
+		cfg.OAuth.CookieSecure,
+		cfg.OAuth.FlowTTL,
+	)
+	if err != nil {
+		log.Fatalf("create OAuth flow cookie manager: %v", err)
+	}
+	oauthService, err := oauth.NewService(pool, queries, sessionService)
+	if err != nil {
+		log.Fatalf("create OAuth service: %v", err)
+	}
+	oauthHandler := handler.NewOAuthHandler(googleProvider, oauthCookies, oauthService)
+	emailSender, err := mailer.NewSMTPSender(mailer.SMTPConfig{
+		Host:       cfg.SMTP.Host,
+		Port:       cfg.SMTP.Port,
+		Username:   cfg.SMTP.Username,
+		Password:   cfg.SMTP.Password,
+		From:       cfg.SMTP.From,
+		RequireTLS: cfg.SMTP.RequireTLS,
+		Timeout:    cfg.SMTP.Timeout,
+	})
+	if err != nil {
+		log.Fatalf("create SMTP sender: %v", err)
+	}
+	passwordResetService, err := passwordreset.NewService(
+		pool,
+		queries,
+		emailSender,
+		cfg.PasswordReset.Pepper,
+		cfg.PasswordReset.OTPTTL,
+		cfg.PasswordReset.TokenTTL,
+		cfg.PasswordReset.RequestCooldown,
+	)
+	if err != nil {
+		log.Fatalf("create password reset service: %v", err)
+	}
+	passwordResetHandler := handler.NewPasswordResetHandler(passwordResetService, log.Default())
+	passwordResetCleanupWorker := passwordreset.NewCleanupWorker(
+		passwordResetService,
+		cfg.PasswordReset.CleanupInterval,
+		log.Default(),
+	)
 	authMiddleware := middleware.NewAuthMiddleware(tokenManager)
 	bookingService := booking.NewService(pool, queries)
 	newAdminBookingService := admin_booking.NewService(queries)
@@ -206,6 +262,11 @@ func main() {
 	mux.HandleFunc("POST /auth/login", authHandler.LoginUser)
 	mux.HandleFunc("POST /auth/refresh", authHandler.RefreshToken)
 	mux.HandleFunc("POST /auth/logout", authHandler.Logout)
+	mux.HandleFunc("GET /auth/google", oauthHandler.StartGoogle)
+	mux.HandleFunc("GET /auth/google/callback", oauthHandler.GoogleCallback)
+	mux.HandleFunc("POST /auth/password-reset/request", passwordResetHandler.Request)
+	mux.HandleFunc("POST /auth/password-reset/verify", passwordResetHandler.Verify)
+	mux.HandleFunc("POST /auth/password-reset/confirm", passwordResetHandler.Confirm)
 
 	addr := ":" + strconv.Itoa(cfg.API.Port)
 
@@ -218,7 +279,7 @@ func main() {
 
 	var workerWG sync.WaitGroup
 
-	workerWG.Add(2)
+	workerWG.Add(3)
 	go func() {
 		defer workerWG.Done()
 		completionWorker.Run(appCtx)
@@ -226,6 +287,10 @@ func main() {
 	go func() {
 		defer workerWG.Done()
 		sessionCleanupWorker.Run(appCtx)
+	}()
+	go func() {
+		defer workerWG.Done()
+		passwordResetCleanupWorker.Run(appCtx)
 	}()
 
 	serverErrors := make(chan error, 1)
