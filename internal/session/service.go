@@ -51,6 +51,20 @@ func NewService(pool *pgxpool.Pool, queries *sqlc.Queries, tokens *auth.TokenMan
 	}, nil
 }
 func (s *Service) IssueTokenPair(ctx context.Context, userID int64, role string) (TokenPair, error) {
+	return s.issueTokenPair(ctx, s.queries, userID, role)
+}
+
+// IssueTokenPairInTx stores the refresh token using the caller's transaction.
+// This lets workflows such as OAuth code exchange commit token issuance and
+// one-time-code consumption atomically.
+func (s *Service) IssueTokenPairInTx(ctx context.Context, tx pgx.Tx, userID int64, role string) (TokenPair, error) {
+	if tx == nil {
+		return TokenPair{}, errors.New("transaction is required")
+	}
+	return s.issueTokenPair(ctx, s.queries.WithTx(tx), userID, role)
+}
+
+func (s *Service) issueTokenPair(ctx context.Context, queries *sqlc.Queries, userID int64, role string) (TokenPair, error) {
 	if userID <= 0 {
 		return TokenPair{}, ErrInvalidUserID
 	}
@@ -64,7 +78,7 @@ func (s *Service) IssueTokenPair(ctx context.Context, userID int64, role string)
 	}
 	refreshExpiresAt := s.now().UTC().Add(s.refreshTTL)
 	hashToken := auth.HashRefreshToken(refreshToken)
-	_, err = s.queries.CreateRefreshToken(ctx, sqlc.CreateRefreshTokenParams{
+	_, err = queries.CreateRefreshToken(ctx, sqlc.CreateRefreshTokenParams{
 		UserID:    userID,
 		TokenHash: hashToken[:],
 		ExpiresAt: pgtype.Timestamptz{

@@ -18,6 +18,9 @@ type Config struct {
 	API struct {
 		Port int
 	}
+	CORS struct {
+		FrontendOrigin string
+	}
 	SMTP struct {
 		Host       string
 		Port       int
@@ -33,15 +36,19 @@ type Config struct {
 		RedirectURL  string
 	}
 	OAuth struct {
-		CookieSecret string
-		CookieSecure bool
-		FlowTTL      time.Duration
+		CookieSecret       string
+		CookieSecure       bool
+		FlowTTL            time.Duration
+		SuccessRedirectURL string
+		LoginCodeTTL       time.Duration
+		CleanupInterval    time.Duration
 	}
 	JWT struct {
-		Secret          string
-		AccessTTL       time.Duration
-		RefreshTTL      time.Duration
-		CleanupInterval time.Duration
+		Secret              string
+		AccessTTL           time.Duration
+		RefreshTTL          time.Duration
+		CleanupInterval     time.Duration
+		RefreshCookieSecure bool
 	}
 	PasswordReset struct {
 		Pepper          string
@@ -82,6 +89,10 @@ func Load() (*Config, error) {
 	cleanupInterval, err := getEnvDuration("REFRESH_TOKEN_CLEANUP_INTERVAL_HOURS", 24, "h")
 	if err != nil {
 		return nil, fmt.Errorf("invalid REFRESH_TOKEN_CLEANUP_INTERVAL_HOURS: %w", err)
+	}
+	refreshCookieSecure, err := getEnvBool("REFRESH_COOKIE_SECURE", true)
+	if err != nil {
+		return nil, fmt.Errorf("invalid REFRESH_COOKIE_SECURE: %w", err)
 	}
 	passwordResetPepper := getEnv("PASSWORD_RESET_PEPPER", "")
 	if len([]byte(passwordResetPepper)) < 32 {
@@ -156,6 +167,36 @@ func Load() (*Config, error) {
 	if err != nil {
 		return nil, fmt.Errorf("invalid OAUTH_FLOW_TTL_MINUTES: %w", err)
 	}
+	oauthSuccessRedirectURL := strings.TrimSpace(getEnv("OAUTH_SUCCESS_REDIRECT_URL", ""))
+	parsedOAuthSuccessRedirectURL, err := url.Parse(oauthSuccessRedirectURL)
+	if err != nil || parsedOAuthSuccessRedirectURL.Scheme == "" || parsedOAuthSuccessRedirectURL.Host == "" {
+		return nil, fmt.Errorf("OAUTH_SUCCESS_REDIRECT_URL must be an absolute URL")
+	}
+	if parsedOAuthSuccessRedirectURL.Scheme != "http" && parsedOAuthSuccessRedirectURL.Scheme != "https" {
+		return nil, fmt.Errorf("OAUTH_SUCCESS_REDIRECT_URL must use http or https")
+	}
+	oauthLoginCodeTTL, err := getEnvDuration("OAUTH_LOGIN_CODE_TTL_SECONDS", 120, "s")
+	if err != nil {
+		return nil, fmt.Errorf("invalid OAUTH_LOGIN_CODE_TTL_SECONDS: %w", err)
+	}
+	oauthCleanupInterval, err := getEnvDuration("OAUTH_CLEANUP_INTERVAL_MINUTES", 30, "m")
+	if err != nil {
+		return nil, fmt.Errorf("invalid OAUTH_CLEANUP_INTERVAL_MINUTES: %w", err)
+	}
+	frontendOrigin := strings.TrimSpace(getEnv("FRONTEND_ORIGIN", ""))
+	parsedFrontendOrigin, err := url.Parse(frontendOrigin)
+	if err != nil || parsedFrontendOrigin.Scheme == "" || parsedFrontendOrigin.Host == "" {
+		return nil, fmt.Errorf("FRONTEND_ORIGIN must be an absolute origin")
+	}
+	if parsedFrontendOrigin.Scheme != "http" && parsedFrontendOrigin.Scheme != "https" {
+		return nil, fmt.Errorf("FRONTEND_ORIGIN must use http or https")
+	}
+	if parsedFrontendOrigin.User != nil ||
+		(parsedFrontendOrigin.Path != "" && parsedFrontendOrigin.Path != "/") ||
+		parsedFrontendOrigin.RawQuery != "" || parsedFrontendOrigin.Fragment != "" {
+		return nil, fmt.Errorf("FRONTEND_ORIGIN must not contain credentials, a path, query, or fragment")
+	}
+	frontendOrigin = strings.ToLower(parsedFrontendOrigin.Scheme) + "://" + strings.ToLower(parsedFrontendOrigin.Host)
 
 	cfg = &Config{
 		Database: struct {
@@ -168,16 +209,23 @@ func Load() (*Config, error) {
 		}{
 			Port: port,
 		},
-		JWT: struct {
-			Secret          string
-			AccessTTL       time.Duration
-			RefreshTTL      time.Duration
-			CleanupInterval time.Duration
+		CORS: struct {
+			FrontendOrigin string
 		}{
-			Secret:          jwtSecret,
-			AccessTTL:       accessTTL,
-			RefreshTTL:      refreshTTL,
-			CleanupInterval: cleanupInterval,
+			FrontendOrigin: frontendOrigin,
+		},
+		JWT: struct {
+			Secret              string
+			AccessTTL           time.Duration
+			RefreshTTL          time.Duration
+			CleanupInterval     time.Duration
+			RefreshCookieSecure bool
+		}{
+			Secret:              jwtSecret,
+			AccessTTL:           accessTTL,
+			RefreshTTL:          refreshTTL,
+			CleanupInterval:     cleanupInterval,
+			RefreshCookieSecure: refreshCookieSecure,
 		},
 		PasswordReset: struct {
 			Pepper          string
@@ -219,13 +267,19 @@ func Load() (*Config, error) {
 			RedirectURL:  googleRedirectURL,
 		},
 		OAuth: struct {
-			CookieSecret string
-			CookieSecure bool
-			FlowTTL      time.Duration
+			CookieSecret       string
+			CookieSecure       bool
+			FlowTTL            time.Duration
+			SuccessRedirectURL string
+			LoginCodeTTL       time.Duration
+			CleanupInterval    time.Duration
 		}{
-			CookieSecret: oauthCookieSecret,
-			CookieSecure: oauthCookieSecure,
-			FlowTTL:      oauthFlowTTL,
+			CookieSecret:       oauthCookieSecret,
+			CookieSecure:       oauthCookieSecure,
+			FlowTTL:            oauthFlowTTL,
+			SuccessRedirectURL: oauthSuccessRedirectURL,
+			LoginCodeTTL:       oauthLoginCodeTTL,
+			CleanupInterval:    oauthCleanupInterval,
 		},
 		Environment: getEnv("ENV", "development"),
 	}

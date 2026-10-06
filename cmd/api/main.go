@@ -70,7 +70,8 @@ func main() {
 	if err != nil {
 		log.Fatalf("create session service: %v", err)
 	}
-	authHandler := handler.NewAuthHandler(queries, sessionService)
+	refreshCookies := session.NewRefreshCookieManager(cfg.JWT.RefreshCookieSecure)
+	authHandler := handler.NewAuthHandler(queries, sessionService, refreshCookies)
 	googleIDTokenValidator := oauth.NewGoogleIDTokenValidator(nil)
 	googleProvider, err := oauth.NewGoogleProvider(
 		cfg.GoogleOAuth.ClientID,
@@ -89,11 +90,20 @@ func main() {
 	if err != nil {
 		log.Fatalf("create OAuth flow cookie manager: %v", err)
 	}
-	oauthService, err := oauth.NewService(pool, queries, sessionService)
+	oauthService, err := oauth.NewService(pool, queries, sessionService, cfg.OAuth.LoginCodeTTL)
 	if err != nil {
 		log.Fatalf("create OAuth service: %v", err)
 	}
-	oauthHandler := handler.NewOAuthHandler(googleProvider, oauthCookies, oauthService)
+	oauthHandler, err := handler.NewOAuthHandler(
+		googleProvider,
+		oauthCookies,
+		oauthService,
+		refreshCookies,
+		cfg.OAuth.SuccessRedirectURL,
+	)
+	if err != nil {
+		log.Fatalf("create OAuth handler: %v", err)
+	}
 	emailSender, err := mailer.NewSMTPSender(mailer.SMTPConfig{
 		Host:       cfg.SMTP.Host,
 		Port:       cfg.SMTP.Port,
@@ -125,6 +135,25 @@ func main() {
 		log.Default(),
 	)
 	authMiddleware := middleware.NewAuthMiddleware(tokenManager)
+	corsMiddleware, err := middleware.NewCORSMiddleware(cfg.CORS.FrontendOrigin)
+	if err != nil {
+		log.Fatalf("create CORS middleware: %v", err)
+	}
+	authRateLimiter, err := middleware.NewIPRateLimiter(
+		map[string]middleware.RateLimitPolicy{
+			"register":               {Requests: 5, Window: time.Minute},
+			"login":                  {Requests: 5, Window: time.Minute},
+			"password-reset-request": {Requests: 3, Window: 15 * time.Minute},
+			"password-reset-verify":  {Requests: 10, Window: 10 * time.Minute},
+			"password-reset-confirm": {Requests: 10, Window: 10 * time.Minute},
+			"oauth-exchange":         {Requests: 10, Window: time.Minute},
+			"refresh":                {Requests: 30, Window: time.Minute},
+		},
+		5*time.Minute,
+	)
+	if err != nil {
+		log.Fatalf("create authentication rate limiter: %v", err)
+	}
 	bookingService := booking.NewService(pool, queries)
 	newAdminBookingService := admin_booking.NewService(queries)
 	completionWorker := booking.NewCompletionWorker(
@@ -135,6 +164,11 @@ func main() {
 	sessionCleanupWorker := session.NewCleanupWorker(
 		sessionService,
 		cfg.JWT.CleanupInterval,
+		log.Default(),
+	)
+	oauthCleanupWorker := oauth.NewCleanupWorker(
+		oauthService,
+		cfg.OAuth.CleanupInterval,
 		log.Default(),
 	)
 	bookingHandler := handler.NewBookingHandler(bookingService)
@@ -258,28 +292,31 @@ func main() {
 		bookingHandler.ListAvailableRoomTypes,
 	)
 	mux.HandleFunc("GET /hotels/search", bookingHandler.SearchAvailableHotels)
-	mux.HandleFunc("POST /auth/register", authHandler.RegisterUser)
-	mux.HandleFunc("POST /auth/login", authHandler.LoginUser)
-	mux.HandleFunc("POST /auth/refresh", authHandler.RefreshToken)
-	mux.HandleFunc("POST /auth/logout", authHandler.Logout)
+	mux.Handle("POST /auth/register", authRateLimiter.Limit("register", http.HandlerFunc(authHandler.RegisterUser)))
+	mux.Handle("POST /auth/login", authRateLimiter.Limit("login", http.HandlerFunc(authHandler.LoginUser)))
+	mux.Handle("POST /auth/refresh", corsMiddleware.RequireAllowedOrigin(
+		authRateLimiter.Limit("refresh", http.HandlerFunc(authHandler.RefreshToken)),
+	))
+	mux.Handle("POST /auth/logout", corsMiddleware.RequireAllowedOrigin(http.HandlerFunc(authHandler.Logout)))
 	mux.HandleFunc("GET /auth/google", oauthHandler.StartGoogle)
 	mux.HandleFunc("GET /auth/google/callback", oauthHandler.GoogleCallback)
-	mux.HandleFunc("POST /auth/password-reset/request", passwordResetHandler.Request)
-	mux.HandleFunc("POST /auth/password-reset/verify", passwordResetHandler.Verify)
-	mux.HandleFunc("POST /auth/password-reset/confirm", passwordResetHandler.Confirm)
+	mux.Handle("POST /auth/oauth/exchange", authRateLimiter.Limit("oauth-exchange", http.HandlerFunc(oauthHandler.ExchangeCode)))
+	mux.Handle("POST /auth/password-reset/request", authRateLimiter.Limit("password-reset-request", http.HandlerFunc(passwordResetHandler.Request)))
+	mux.Handle("POST /auth/password-reset/verify", authRateLimiter.Limit("password-reset-verify", http.HandlerFunc(passwordResetHandler.Verify)))
+	mux.Handle("POST /auth/password-reset/confirm", authRateLimiter.Limit("password-reset-confirm", http.HandlerFunc(passwordResetHandler.Confirm)))
 
 	addr := ":" + strconv.Itoa(cfg.API.Port)
 
 	server := &http.Server{
 		Addr:              addr,
-		Handler:           mux,
+		Handler:           middleware.RequestID(corsMiddleware.Allow(mux)),
 		ReadHeaderTimeout: 5 * time.Second,
 		IdleTimeout:       60 * time.Second,
 	}
 
 	var workerWG sync.WaitGroup
 
-	workerWG.Add(3)
+	workerWG.Add(4)
 	go func() {
 		defer workerWG.Done()
 		completionWorker.Run(appCtx)
@@ -291,6 +328,10 @@ func main() {
 	go func() {
 		defer workerWG.Done()
 		passwordResetCleanupWorker.Run(appCtx)
+	}()
+	go func() {
+		defer workerWG.Done()
+		oauthCleanupWorker.Run(appCtx)
 	}()
 
 	serverErrors := make(chan error, 1)

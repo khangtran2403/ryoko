@@ -3,6 +3,7 @@ package oauth
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -31,7 +32,7 @@ type issuedSession struct {
 	role   string
 }
 
-func (i *recordingTokenIssuer) IssueTokenPair(_ context.Context, userID int64, role string) (session.TokenPair, error) {
+func (i *recordingTokenIssuer) IssueTokenPairInTx(_ context.Context, _ pgx.Tx, userID int64, role string) (session.TokenPair, error) {
 	i.mu.Lock()
 	defer i.mu.Unlock()
 	i.calls = append(i.calls, issuedSession{userID: userID, role: role})
@@ -47,16 +48,13 @@ func (i *recordingTokenIssuer) snapshot() []issuedSession {
 func TestAuthenticateGoogleCreatesPasswordlessUserAndLink(t *testing.T) {
 	pool, service, issuer := newOAuthIntegrationService(t)
 
-	pair, err := service.AuthenticateGoogle(context.Background(), GoogleIdentity{
+	user, err := service.AuthenticateGoogle(context.Background(), GoogleIdentity{
 		Subject: "google-new-user",
 		Email:   "NEW.User@Example.com",
 		Name:    "New User",
 	})
 	if err != nil {
 		t.Fatalf("AuthenticateGoogle() error = %v", err)
-	}
-	if pair.AccessToken == "" {
-		t.Fatal("AuthenticateGoogle() returned an empty access token")
 	}
 
 	var userID int64
@@ -77,9 +75,11 @@ func TestAuthenticateGoogleCreatesPasswordlessUserAndLink(t *testing.T) {
 	}
 
 	assertOAuthAccount(t, pool, userID, "google-new-user", "new.user@example.com")
-	calls := issuer.snapshot()
-	if len(calls) != 1 || calls[0] != (issuedSession{userID: userID, role: auth.RoleCustomer}) {
-		t.Errorf("issued sessions = %+v", calls)
+	if user != (AuthenticatedUser{ID: userID, Role: auth.RoleCustomer}) {
+		t.Errorf("authenticated user = %+v", user)
+	}
+	if calls := issuer.snapshot(); len(calls) != 0 {
+		t.Errorf("AuthenticateGoogle issued sessions = %+v, want none", calls)
 	}
 }
 
@@ -106,9 +106,8 @@ func TestAuthenticateGoogleLinksExistingUserWithoutOverwritingProfile(t *testing
 		t.Errorf("existing profile changed to {%q %q}", fullName, role)
 	}
 	assertOAuthAccount(t, pool, userID, "google-existing-user", "existing@example.com")
-	calls := issuer.snapshot()
-	if len(calls) != 1 || calls[0].userID != userID || calls[0].role != auth.RoleAdmin {
-		t.Errorf("issued sessions = %+v", calls)
+	if calls := issuer.snapshot(); len(calls) != 0 {
+		t.Errorf("AuthenticateGoogle issued sessions = %+v, want none", calls)
 	}
 }
 
@@ -192,9 +191,106 @@ func TestConcurrentAuthenticateGoogleConvergesOnOneAccount(t *testing.T) {
 	if users != 1 || accounts != 1 {
 		t.Errorf("users = %d, accounts = %d, want 1 and 1", users, accounts)
 	}
-	calls := issuer.snapshot()
-	if len(calls) != 2 || calls[0].userID != calls[1].userID {
-		t.Errorf("issued sessions = %+v, want two for the same user", calls)
+	if calls := issuer.snapshot(); len(calls) != 0 {
+		t.Errorf("AuthenticateGoogle issued sessions = %+v, want none", calls)
+	}
+}
+
+func TestOAuthLoginCodeIsHashedAndSingleUse(t *testing.T) {
+	pool, service, issuer := newOAuthIntegrationService(t)
+	fixedNow := time.Now().UTC().Add(time.Hour).Truncate(time.Second)
+	service.now = func() time.Time { return fixedNow }
+
+	loginCode, err := service.CreateGoogleLoginCode(context.Background(), GoogleIdentity{
+		Subject: "login-code-subject", Email: "login-code@example.com", Name: "Login Code User",
+	})
+	if err != nil {
+		t.Fatalf("CreateGoogleLoginCode() error = %v", err)
+	}
+	if loginCode.Code == "" || !loginCode.ExpiresAt.Equal(fixedNow.Add(2*time.Minute)) {
+		t.Fatalf("login code = %+v", loginCode)
+	}
+	hash := sha256.Sum256([]byte(loginCode.Code))
+	var storedHash []byte
+	if err := pool.QueryRow(context.Background(),
+		"SELECT code_hash FROM oauth_login_codes WHERE code_hash = $1", hash[:],
+	).Scan(&storedHash); err != nil {
+		t.Fatalf("load stored login code: %v", err)
+	}
+	if string(storedHash) == loginCode.Code {
+		t.Fatal("raw OAuth login code was stored")
+	}
+
+	pair, err := service.ExchangeLoginCode(context.Background(), loginCode.Code)
+	if err != nil {
+		t.Fatalf("ExchangeLoginCode() error = %v", err)
+	}
+	if pair.AccessToken == "" {
+		t.Fatal("ExchangeLoginCode() returned an empty access token")
+	}
+	if _, err := service.ExchangeLoginCode(context.Background(), loginCode.Code); !errors.Is(err, ErrConsumedLoginCode) {
+		t.Fatalf("second exchange error = %v, want ErrConsumedLoginCode", err)
+	}
+	if calls := issuer.snapshot(); len(calls) != 1 {
+		t.Errorf("issued sessions = %+v, want exactly one", calls)
+	}
+}
+
+func TestOAuthLoginCodeExpires(t *testing.T) {
+	_, service, issuer := newOAuthIntegrationService(t)
+	fixedNow := time.Now().UTC().Add(time.Hour).Truncate(time.Second)
+	service.now = func() time.Time { return fixedNow }
+	loginCode, err := service.CreateGoogleLoginCode(context.Background(), GoogleIdentity{
+		Subject: "expired-code-subject", Email: "expired-code@example.com", Name: "Expired Code User",
+	})
+	if err != nil {
+		t.Fatalf("CreateGoogleLoginCode() error = %v", err)
+	}
+	service.now = func() time.Time { return loginCode.ExpiresAt }
+	if _, err := service.ExchangeLoginCode(context.Background(), loginCode.Code); !errors.Is(err, ErrExpiredLoginCode) {
+		t.Fatalf("exchange error = %v, want ErrExpiredLoginCode", err)
+	}
+	if calls := issuer.snapshot(); len(calls) != 0 {
+		t.Errorf("expired code issued sessions = %+v", calls)
+	}
+}
+
+func TestConcurrentOAuthLoginCodeExchangeIssuesOneSession(t *testing.T) {
+	_, service, issuer := newOAuthIntegrationService(t)
+	loginCode, err := service.CreateGoogleLoginCode(context.Background(), GoogleIdentity{
+		Subject: "concurrent-code-subject", Email: "concurrent-code@example.com", Name: "Concurrent Code User",
+	})
+	if err != nil {
+		t.Fatalf("CreateGoogleLoginCode() error = %v", err)
+	}
+
+	start := make(chan struct{})
+	errorsCh := make(chan error, 2)
+	for range 2 {
+		go func() {
+			<-start
+			_, err := service.ExchangeLoginCode(context.Background(), loginCode.Code)
+			errorsCh <- err
+		}()
+	}
+	close(start)
+	var success, consumed int
+	for range 2 {
+		err := <-errorsCh
+		switch {
+		case err == nil:
+			success++
+		case errors.Is(err, ErrConsumedLoginCode):
+			consumed++
+		default:
+			t.Fatalf("unexpected exchange error: %v", err)
+		}
+	}
+	if success != 1 || consumed != 1 {
+		t.Fatalf("results = {success:%d consumed:%d}, want {1 1}", success, consumed)
+	}
+	if calls := issuer.snapshot(); len(calls) != 1 {
+		t.Errorf("issued sessions = %+v, want exactly one", calls)
 	}
 }
 
@@ -247,7 +343,7 @@ func newOAuthIntegrationService(t *testing.T) (*pgxpool.Pool, *Service, *recordi
 
 	applyOAuthMigrations(t, pool)
 	issuer := &recordingTokenIssuer{}
-	service, err := NewService(pool, sqlc.New(pool), issuer)
+	service, err := NewService(pool, sqlc.New(pool), issuer, 2*time.Minute)
 	if err != nil {
 		t.Fatalf("NewService() error = %v", err)
 	}

@@ -27,9 +27,16 @@ type authQueries interface {
 	GetUserForLogin(ctx context.Context, email string) (sqlc.GetUserForLoginRow, error)
 }
 
+type refreshCookieManager interface {
+	Set(w http.ResponseWriter, rawToken string, expiresAt time.Time) error
+	Read(r *http.Request) (string, error)
+	Clear(w http.ResponseWriter)
+}
+
 type AuthHandler struct {
 	queries        authQueries
 	sessionService authSessionService
+	refreshCookies refreshCookieManager
 }
 
 type RegisterRequest struct {
@@ -43,21 +50,22 @@ type LoginRequest struct {
 	Email    string `json:"email"`
 	Password string `json:"password"`
 }
-type RefreshRequest struct {
-	RefreshToken string `json:"refresh_token"`
-}
 type LoginResponse struct {
 	AccessToken      string    `json:"access_token"`
-	RefreshToken     string    `json:"refresh_token"`
 	TokenType        string    `json:"token_type"`
 	ExpiresIn        int64     `json:"expires_in"`
 	RefreshExpiresAt time.Time `json:"refresh_expires_at"`
 }
 
-func NewAuthHandler(queries authQueries, sessionService authSessionService) *AuthHandler {
+func NewAuthHandler(
+	queries authQueries,
+	sessionService authSessionService,
+	refreshCookies refreshCookieManager,
+) *AuthHandler {
 	return &AuthHandler{
 		queries:        queries,
 		sessionService: sessionService,
+		refreshCookies: refreshCookies,
 	}
 }
 
@@ -144,32 +152,28 @@ func (h *AuthHandler) LoginUser(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Failed to generate token", http.StatusInternalServerError)
 		return
 	}
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(LoginResponse{
-		AccessToken:      token.AccessToken,
-		RefreshToken:     token.RefreshToken,
-		TokenType:        "Bearer",
-		ExpiresIn:        token.AccessExpiresIn,
-		RefreshExpiresAt: token.RefreshExpiresAt,
-	})
+	if err := writeSessionResponse(w, token, h.refreshCookies); err != nil {
+		http.Error(w, "Failed to create session", http.StatusInternalServerError)
+	}
 }
 func (h *AuthHandler) RefreshToken(w http.ResponseWriter, r *http.Request) {
-	var req RefreshRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "Invalid request body", http.StatusBadRequest)
+	rawRefreshToken, err := h.refreshCookies.Read(r)
+	if errors.Is(err, session.ErrRefreshCookieMissing) {
+		h.refreshCookies.Clear(w)
+		http.Error(w, "Invalid refresh token", http.StatusUnauthorized)
 		return
 	}
-	req.RefreshToken = strings.TrimSpace(req.RefreshToken)
-	if req.RefreshToken == "" {
-		http.Error(w, "Refresh token is required", http.StatusBadRequest)
+	if err != nil {
+		http.Error(w, "Failed to read refresh token", http.StatusInternalServerError)
 		return
 	}
-	token, err := h.sessionService.RotateTokenPair(r.Context(), req.RefreshToken)
+	token, err := h.sessionService.RotateTokenPair(r.Context(), rawRefreshToken)
 	switch {
 	case errors.Is(err, session.ErrInvalidRefreshToken),
 		errors.Is(err, session.ErrRefreshTokenExpired),
 		errors.Is(err, session.ErrRefreshTokenRevoked),
 		errors.Is(err, session.ErrRefreshTokenReused):
+		h.refreshCookies.Clear(w)
 		http.Error(w, "Invalid refresh token", http.StatusUnauthorized)
 		return
 
@@ -178,32 +182,27 @@ func (h *AuthHandler) RefreshToken(w http.ResponseWriter, r *http.Request) {
 		return
 
 	default:
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(LoginResponse{
-			AccessToken:      token.AccessToken,
-			RefreshToken:     token.RefreshToken,
-			TokenType:        "Bearer",
-			ExpiresIn:        token.AccessExpiresIn,
-			RefreshExpiresAt: token.RefreshExpiresAt,
-		})
+		if err := writeSessionResponse(w, token, h.refreshCookies); err != nil {
+			http.Error(w, "Failed to update session", http.StatusInternalServerError)
+		}
 	}
 }
 
 func (h *AuthHandler) Logout(w http.ResponseWriter, r *http.Request) {
-	var req RefreshRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "Invalid request body", http.StatusBadRequest)
+	rawRefreshToken, err := h.refreshCookies.Read(r)
+	h.refreshCookies.Clear(w)
+	if errors.Is(err, session.ErrRefreshCookieMissing) {
+		w.WriteHeader(http.StatusNoContent)
 		return
 	}
-	req.RefreshToken = strings.TrimSpace(req.RefreshToken)
-	if req.RefreshToken == "" {
-		http.Error(w, "Refresh token is required", http.StatusBadRequest)
+	if err != nil {
+		http.Error(w, "Failed to read refresh token", http.StatusInternalServerError)
 		return
 	}
 
-	err := h.sessionService.RevokeRefreshToken(r.Context(), req.RefreshToken)
+	err = h.sessionService.RevokeRefreshToken(r.Context(), rawRefreshToken)
 	if errors.Is(err, session.ErrInvalidRefreshToken) {
-		http.Error(w, "Invalid refresh token", http.StatusBadRequest)
+		w.WriteHeader(http.StatusNoContent)
 		return
 	}
 	if err != nil {
@@ -212,4 +211,23 @@ func (h *AuthHandler) Logout(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.WriteHeader(http.StatusNoContent)
+}
+
+func writeSessionResponse(
+	w http.ResponseWriter,
+	pair session.TokenPair,
+	cookies refreshCookieManager,
+) error {
+	if err := cookies.Set(w, pair.RefreshToken, pair.RefreshExpiresAt); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Pragma", "no-cache")
+	return json.NewEncoder(w).Encode(LoginResponse{
+		AccessToken:      pair.AccessToken,
+		TokenType:        "Bearer",
+		ExpiresIn:        pair.AccessExpiresIn,
+		RefreshExpiresAt: pair.RefreshExpiresAt,
+	})
 }

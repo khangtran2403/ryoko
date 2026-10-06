@@ -14,6 +14,7 @@ func TestLoadTokenDurations(t *testing.T) {
 	t.Setenv("ACCESS_TOKEN_TTL_MINUTES", "20")
 	t.Setenv("REFRESH_TOKEN_TTL_HOURS", "48")
 	t.Setenv("REFRESH_TOKEN_CLEANUP_INTERVAL_HOURS", "6")
+	t.Setenv("REFRESH_COOKIE_SECURE", "false")
 
 	loaded, err := Load()
 	if err != nil {
@@ -28,6 +29,9 @@ func TestLoadTokenDurations(t *testing.T) {
 	if loaded.JWT.CleanupInterval != 6*time.Hour {
 		t.Errorf("CleanupInterval = %v, want %v", loaded.JWT.CleanupInterval, 6*time.Hour)
 	}
+	if loaded.JWT.RefreshCookieSecure {
+		t.Error("RefreshCookieSecure = true, want false")
+	}
 }
 
 func TestLoadRejectsInvalidTokenDurations(t *testing.T) {
@@ -39,6 +43,7 @@ func TestLoadRejectsInvalidTokenDurations(t *testing.T) {
 		{name: "invalid access TTL", key: "ACCESS_TOKEN_TTL_MINUTES", value: "abc"},
 		{name: "zero refresh TTL", key: "REFRESH_TOKEN_TTL_HOURS", value: "0"},
 		{name: "negative cleanup interval", key: "REFRESH_TOKEN_CLEANUP_INTERVAL_HOURS", value: "-1"},
+		{name: "invalid refresh cookie secure", key: "REFRESH_COOKIE_SECURE", value: "sometimes"},
 	}
 
 	for _, tt := range tests {
@@ -262,6 +267,9 @@ func TestLoadOAuthConfig(t *testing.T) {
 	t.Setenv("OAUTH_COOKIE_SECRET", "test-oauth-cookie-secret-at-least-32-bytes-long")
 	t.Setenv("OAUTH_COOKIE_SECURE", "false")
 	t.Setenv("OAUTH_FLOW_TTL_MINUTES", "12")
+	t.Setenv("OAUTH_SUCCESS_REDIRECT_URL", "https://app.example.com/auth/callback")
+	t.Setenv("OAUTH_LOGIN_CODE_TTL_SECONDS", "90")
+	t.Setenv("OAUTH_CLEANUP_INTERVAL_MINUTES", "20")
 
 	loaded, err := Load()
 	if err != nil {
@@ -281,6 +289,45 @@ func TestLoadOAuthConfig(t *testing.T) {
 	if loaded.OAuth.FlowTTL != 12*time.Minute {
 		t.Errorf("OAuth.FlowTTL = %v, want %v", loaded.OAuth.FlowTTL, 12*time.Minute)
 	}
+	if loaded.OAuth.SuccessRedirectURL != "https://app.example.com/auth/callback" {
+		t.Errorf("OAuth.SuccessRedirectURL = %q", loaded.OAuth.SuccessRedirectURL)
+	}
+	if loaded.OAuth.LoginCodeTTL != 90*time.Second {
+		t.Errorf("OAuth.LoginCodeTTL = %v, want 90s", loaded.OAuth.LoginCodeTTL)
+	}
+	if loaded.OAuth.CleanupInterval != 20*time.Minute {
+		t.Errorf("OAuth.CleanupInterval = %v, want 20m", loaded.OAuth.CleanupInterval)
+	}
+}
+
+func TestLoadCORSConfig(t *testing.T) {
+	setRequiredSMTPEnv(t)
+	t.Setenv("JWT_SECRET", "test-secret-that-is-at-least-32-bytes-long")
+	t.Setenv("PASSWORD_RESET_PEPPER", "test-password-reset-pepper-at-least-32-bytes-long")
+	t.Setenv("FRONTEND_ORIGIN", "https://APP.Example.com/")
+
+	loaded, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if loaded.CORS.FrontendOrigin != "https://app.example.com" {
+		t.Errorf("CORS.FrontendOrigin = %q", loaded.CORS.FrontendOrigin)
+	}
+}
+
+func TestLoadRejectsInvalidFrontendOrigin(t *testing.T) {
+	for _, origin := range []string{"", "/relative", "ftp://example.com", "https://example.com/path", "https://example.com?query=1"} {
+		t.Run(origin, func(t *testing.T) {
+			setRequiredSMTPEnv(t)
+			t.Setenv("JWT_SECRET", "test-secret-that-is-at-least-32-bytes-long")
+			t.Setenv("PASSWORD_RESET_PEPPER", "test-password-reset-pepper-at-least-32-bytes-long")
+			t.Setenv("FRONTEND_ORIGIN", origin)
+			_, err := Load()
+			if err == nil || !strings.Contains(err.Error(), "FRONTEND_ORIGIN") {
+				t.Errorf("Load() error = %v, want FRONTEND_ORIGIN error", err)
+			}
+		})
+	}
 }
 
 func TestLoadRejectsInvalidOAuthConfig(t *testing.T) {
@@ -297,6 +344,11 @@ func TestLoadRejectsInvalidOAuthConfig(t *testing.T) {
 		{name: "short cookie secret", key: "OAUTH_COOKIE_SECRET", value: "too-short"},
 		{name: "invalid secure flag", key: "OAUTH_COOKIE_SECURE", value: "sometimes"},
 		{name: "zero flow TTL", key: "OAUTH_FLOW_TTL_MINUTES", value: "0"},
+		{name: "missing success redirect", key: "OAUTH_SUCCESS_REDIRECT_URL", value: ""},
+		{name: "relative success redirect", key: "OAUTH_SUCCESS_REDIRECT_URL", value: "/auth/callback"},
+		{name: "unsupported success redirect scheme", key: "OAUTH_SUCCESS_REDIRECT_URL", value: "ftp://example.com/callback"},
+		{name: "zero login code TTL", key: "OAUTH_LOGIN_CODE_TTL_SECONDS", value: "0"},
+		{name: "zero cleanup interval", key: "OAUTH_CLEANUP_INTERVAL_MINUTES", value: "0"},
 	}
 
 	for _, tt := range tests {
@@ -332,4 +384,9 @@ func setRequiredSMTPEnv(t *testing.T) {
 	t.Setenv("OAUTH_COOKIE_SECRET", "test-oauth-cookie-secret-at-least-32-bytes-long")
 	t.Setenv("OAUTH_COOKIE_SECURE", "false")
 	t.Setenv("OAUTH_FLOW_TTL_MINUTES", "10")
+	t.Setenv("OAUTH_SUCCESS_REDIRECT_URL", "http://localhost:3000/auth/callback")
+	t.Setenv("OAUTH_LOGIN_CODE_TTL_SECONDS", "120")
+	t.Setenv("OAUTH_CLEANUP_INTERVAL_MINUTES", "30")
+	t.Setenv("FRONTEND_ORIGIN", "http://localhost:3000")
+	t.Setenv("REFRESH_COOKIE_SECURE", "false")
 }

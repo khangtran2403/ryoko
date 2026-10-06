@@ -20,6 +20,34 @@ import (
 
 const sessionRefreshTTL = 30 * 24 * time.Hour
 
+func TestIssueTokenPairInTxParticipatesInCallerTransaction(t *testing.T) {
+	pool, service, _ := newSessionIntegrationService(t)
+	userID := insertSessionUser(t, pool, "transactional-session@example.com", auth.RoleCustomer)
+	tx, err := pool.Begin(context.Background())
+	if err != nil {
+		t.Fatalf("begin transaction: %v", err)
+	}
+	pair, err := service.IssueTokenPairInTx(context.Background(), tx, userID, auth.RoleCustomer)
+	if err != nil {
+		_ = tx.Rollback(context.Background())
+		t.Fatalf("IssueTokenPairInTx() error = %v", err)
+	}
+	if err := tx.Rollback(context.Background()); err != nil {
+		t.Fatalf("rollback transaction: %v", err)
+	}
+
+	tokenHash := auth.HashRefreshToken(pair.RefreshToken)
+	var count int
+	if err := pool.QueryRow(context.Background(),
+		"SELECT count(*) FROM refresh_tokens WHERE token_hash = $1", tokenHash[:],
+	).Scan(&count); err != nil {
+		t.Fatalf("count rolled-back refresh token: %v", err)
+	}
+	if count != 0 {
+		t.Errorf("rolled-back refresh token count = %d, want 0", count)
+	}
+}
+
 func TestIssueTokenPairPersistsRefreshToken(t *testing.T) {
 	pool, service, tokens := newSessionIntegrationService(t)
 	userID := insertSessionUser(t, pool, "session@example.com", auth.RoleCustomer)

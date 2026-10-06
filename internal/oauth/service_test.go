@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/khangtran2403/ryoko/internal/db/sqlc"
 	"github.com/khangtran2403/ryoko/internal/session"
@@ -18,7 +20,7 @@ type stubTokenIssuer struct {
 	role   string
 }
 
-func (s *stubTokenIssuer) IssueTokenPair(_ context.Context, userID int64, role string) (session.TokenPair, error) {
+func (s *stubTokenIssuer) IssueTokenPairInTx(_ context.Context, _ pgx.Tx, userID int64, role string) (session.TokenPair, error) {
 	s.calls++
 	s.userID = userID
 	s.role = role
@@ -30,14 +32,17 @@ func TestNewServiceRejectsMissingDependencies(t *testing.T) {
 	queries := sqlc.New(pool)
 	issuer := &stubTokenIssuer{}
 
-	if _, err := NewService(nil, queries, issuer); err == nil {
+	if _, err := NewService(nil, queries, issuer, time.Minute); err == nil {
 		t.Fatal("NewService() with nil pool returned nil error")
 	}
-	if _, err := NewService(pool, nil, issuer); err == nil {
+	if _, err := NewService(pool, nil, issuer, time.Minute); err == nil {
 		t.Fatal("NewService() with nil queries returned nil error")
 	}
-	if _, err := NewService(pool, queries, nil); err == nil {
+	if _, err := NewService(pool, queries, nil, time.Minute); err == nil {
 		t.Fatal("NewService() with nil session service returned nil error")
+	}
+	if _, err := NewService(pool, queries, issuer, 0); err == nil {
+		t.Fatal("NewService() with zero login-code TTL returned nil error")
 	}
 }
 
