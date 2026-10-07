@@ -58,6 +58,7 @@ func TestRoomTypeHandlerUpdatesThroughService(t *testing.T) {
 		"/room-types/7",
 		strings.NewReader(`{"name":"Deluxe King","description":"River view","price_per_night":"1750000.00","capacity":3,"total_rooms":8}`),
 	)
+	request.Header.Set("Content-Type", "application/json")
 
 	mux.ServeHTTP(recorder, request)
 
@@ -104,6 +105,7 @@ func TestRoomTypeHandlerUpdateRejectsInvalidRequests(t *testing.T) {
 			mux.HandleFunc("PUT /room-types/{id}", handler.UpdateRoomType)
 			recorder := httptest.NewRecorder()
 			request := httptest.NewRequest(http.MethodPut, tt.path, strings.NewReader(tt.body))
+			request.Header.Set("Content-Type", "application/json")
 
 			mux.ServeHTTP(recorder, request)
 
@@ -139,6 +141,7 @@ func TestRoomTypeHandlerUpdateMapsServiceErrors(t *testing.T) {
 			mux.HandleFunc("PUT /room-types/{id}", handler.UpdateRoomType)
 			recorder := httptest.NewRecorder()
 			request := httptest.NewRequest(http.MethodPut, "/room-types/7", strings.NewReader(validRoomTypeUpdateBody()))
+			request.Header.Set("Content-Type", "application/json")
 
 			mux.ServeHTTP(recorder, request)
 
@@ -167,6 +170,7 @@ func TestRoomTypeUpdateDescriptionCanBeNullEquivalent(t *testing.T) {
 		"/room-types/7",
 		strings.NewReader(`{"name":"Standard","description":"","price_per_night":"100.00","capacity":2,"total_rooms":5}`),
 	)
+	request.Header.Set("Content-Type", "application/json")
 
 	mux.ServeHTTP(recorder, request)
 

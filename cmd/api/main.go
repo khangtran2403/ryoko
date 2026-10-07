@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
@@ -30,6 +31,14 @@ import (
 	"github.com/khangtran2403/ryoko/internal/review"
 	"github.com/khangtran2403/ryoko/internal/roomtype"
 	"github.com/khangtran2403/ryoko/internal/session"
+)
+
+const (
+	serverReadHeaderTimeout = 5 * time.Second
+	serverReadTimeout       = 15 * time.Second
+	serverWriteTimeout      = 30 * time.Second
+	serverIdleTimeout       = 60 * time.Second
+	serverMaxHeaderBytes    = 64 << 10
 )
 
 func main() {
@@ -307,12 +316,17 @@ func main() {
 
 	addr := ":" + strconv.Itoa(cfg.API.Port)
 
-	server := &http.Server{
-		Addr:              addr,
-		Handler:           middleware.RequestID(corsMiddleware.Allow(mux)),
-		ReadHeaderTimeout: 5 * time.Second,
-		IdleTimeout:       60 * time.Second,
-	}
+	server := newHTTPServer(
+		addr,
+		middleware.SecurityHeaders(
+			middleware.RequestID(
+				middleware.AccessLog(
+					slog.Default(),
+					middleware.RecoverPanic(slog.Default(), corsMiddleware.Allow(mux)),
+				),
+			),
+		),
+	)
 
 	var workerWG sync.WaitGroup
 
@@ -373,4 +387,16 @@ func main() {
 	}
 
 	log.Printf("server stopped")
+}
+
+func newHTTPServer(addr string, handler http.Handler) *http.Server {
+	return &http.Server{
+		Addr:              addr,
+		Handler:           handler,
+		ReadHeaderTimeout: serverReadHeaderTimeout,
+		ReadTimeout:       serverReadTimeout,
+		WriteTimeout:      serverWriteTimeout,
+		IdleTimeout:       serverIdleTimeout,
+		MaxHeaderBytes:    serverMaxHeaderBytes,
+	}
 }

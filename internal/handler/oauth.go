@@ -2,7 +2,6 @@ package handler
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"net/http"
 	"net/url"
@@ -149,8 +148,7 @@ func (h *OAuthHandler) GoogleCallback(w http.ResponseWriter, r *http.Request) {
 // pair. The service makes code consumption and refresh-token storage atomic.
 func (h *OAuthHandler) ExchangeCode(w http.ResponseWriter, r *http.Request) {
 	var req ExchangeOAuthCodeRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "Invalid request body", http.StatusBadRequest)
+	if !decodeJSONRequest(w, r, &req, false) {
 		return
 	}
 	req.Code = strings.TrimSpace(req.Code)

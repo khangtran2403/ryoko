@@ -53,9 +53,7 @@ func (h *ReviewHandler) CreateReview(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Unauthorized", http.StatusUnauthorized)
 		return
 	}
-	err = json.NewDecoder(r.Body).Decode(&req)
-	if err != nil {
-		http.Error(w, "Invalid request body", http.StatusBadRequest)
+	if !decodeJSONRequest(w, r, &req, false) {
 		return
 	}
 	c, err := h.service.CreateReview(r.Context(), review.CreateReview{
@@ -180,9 +178,7 @@ func (h *ReviewHandler) UpdateReviewByUser(w http.ResponseWriter, r *http.Reques
 		http.Error(w, "Unauthorized", http.StatusUnauthorized)
 		return
 	}
-	err = json.NewDecoder(r.Body).Decode(&req)
-	if err != nil {
-		http.Error(w, "Invalid request body", http.StatusBadRequest)
+	if !decodeJSONRequest(w, r, &req, false) {
 		return
 	}
 	update, err := h.service.UpdateReviewByUser(r.Context(), review.UpdateReviewInput{

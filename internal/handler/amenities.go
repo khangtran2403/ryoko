@@ -42,9 +42,7 @@ func NewAmenityHandler(amenityService amenityService) *AmenityHandler {
 func (h *AmenityHandler) CreateAmenity(w http.ResponseWriter, r *http.Request) {
 	var req CreateAmenityRequest
 
-	err := json.NewDecoder(r.Body).Decode(&req)
-	if err != nil {
-		http.Error(w, "Invalid request body", http.StatusBadRequest)
+	if !decodeJSONRequest(w, r, &req, false) {
 		return
 	}
 	name := strings.TrimSpace(req.Name)
@@ -79,8 +77,7 @@ func (h *AmenityHandler) UpdateAmenity(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req CreateAmenityRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "Invalid request body", http.StatusBadRequest)
+	if !decodeJSONRequest(w, r, &req, false) {
 		return
 	}
 	name := strings.TrimSpace(req.Name)
@@ -147,9 +144,7 @@ func (h *AmenityHandler) ListAmenities(w http.ResponseWriter, r *http.Request) {
 func (h *AmenityHandler) AddAmenityToHotel(w http.ResponseWriter, r *http.Request) {
 	var req AttachAmenityToHotelRequest
 
-	err := json.NewDecoder(r.Body).Decode(&req)
-	if err != nil {
-		http.Error(w, "Invalid request body", http.StatusBadRequest)
+	if !decodeJSONRequest(w, r, &req, false) {
 		return
 	}
 	if req.AmenityID <= 0 {

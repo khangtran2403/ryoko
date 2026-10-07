@@ -52,9 +52,7 @@ func (req CreateHotelRequest) Validate() []string {
 
 func (h *HotelHandler) Create(w http.ResponseWriter, r *http.Request) {
 	var req CreateHotelRequest
-	err := json.NewDecoder(r.Body).Decode(&req)
-	if err != nil {
-		http.Error(w, "Invalid request body", http.StatusBadRequest)
+	if !decodeJSONRequest(w, r, &req, false) {
 		return
 	}
 	if problems := req.Validate(); len(problems) > 0 {
@@ -138,8 +136,7 @@ func (h *HotelHandler) UpdateHotel(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Invalid hotel ID", http.StatusBadRequest)
 		return
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "Invalid request body", http.StatusBadRequest)
+	if !decodeJSONRequest(w, r, &req, false) {
 		return
 	}
 	if problems := req.Validate(); len(problems) > 0 {

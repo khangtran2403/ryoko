@@ -64,9 +64,7 @@ func (h *BookingHandler) CreateBooking(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Idempotency-Key header is required", http.StatusBadRequest)
 		return
 	}
-	err = json.NewDecoder(r.Body).Decode(&req)
-	if err != nil {
-		http.Error(w, "Invalid request body", http.StatusBadRequest)
+	if !decodeJSONRequest(w, r, &req, false) {
 		return
 	}
 	checkIn, err := time.Parse(time.DateOnly, req.CheckIn)

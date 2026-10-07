@@ -499,6 +499,9 @@ func performAmenityRequest(
 	pathValues map[string]string,
 ) *httptest.ResponseRecorder {
 	request := httptest.NewRequest(method, path, strings.NewReader(body))
+	if method == http.MethodPost || method == http.MethodPut || method == http.MethodPatch {
+		request.Header.Set("Content-Type", "application/json")
+	}
 	for key, value := range pathValues {
 		request.SetPathValue(key, value)
 	}

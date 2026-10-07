@@ -137,6 +137,7 @@ func TestOAuthHandlerExchangeCodeReturnsTokenPair(t *testing.T) {
 	handler := newTestOAuthHandler(t, &fakeGoogleOAuthProvider{}, service)
 	recorder := httptest.NewRecorder()
 	request := httptest.NewRequest(http.MethodPost, "/auth/oauth/exchange", strings.NewReader(`{"code":"  one-time-code  "}`))
+	request.Header.Set("Content-Type", "application/json")
 
 	handler.ExchangeCode(recorder, request)
 
@@ -161,9 +162,11 @@ func TestOAuthHandlerExchangeCodeRejectsInvalidCodes(t *testing.T) {
 		service := &fakeOAuthAccountService{exchangeErr: serviceErr}
 		handler := newTestOAuthHandler(t, &fakeGoogleOAuthProvider{}, service)
 		recorder := httptest.NewRecorder()
-		handler.ExchangeCode(recorder, httptest.NewRequest(
+		request := httptest.NewRequest(
 			http.MethodPost, "/auth/oauth/exchange", strings.NewReader(`{"code":"bad-code"}`),
-		))
+		)
+		request.Header.Set("Content-Type", "application/json")
+		handler.ExchangeCode(recorder, request)
 		if recorder.Code != http.StatusUnauthorized {
 			t.Errorf("error %v: status = %d, want %d", serviceErr, recorder.Code, http.StatusUnauthorized)
 		}
@@ -175,7 +178,9 @@ func TestOAuthHandlerExchangeCodeRejectsBadRequest(t *testing.T) {
 		service := &fakeOAuthAccountService{}
 		handler := newTestOAuthHandler(t, &fakeGoogleOAuthProvider{}, service)
 		recorder := httptest.NewRecorder()
-		handler.ExchangeCode(recorder, httptest.NewRequest(http.MethodPost, "/auth/oauth/exchange", strings.NewReader(body)))
+		request := httptest.NewRequest(http.MethodPost, "/auth/oauth/exchange", strings.NewReader(body))
+		request.Header.Set("Content-Type", "application/json")
+		handler.ExchangeCode(recorder, request)
 		if recorder.Code != http.StatusBadRequest {
 			t.Errorf("body %q: status = %d, want %d", body, recorder.Code, http.StatusBadRequest)
 		}

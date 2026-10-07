@@ -57,8 +57,7 @@ func NewPasswordResetHandler(service passwordResetService, logger *log.Logger) *
 
 func (h *PasswordResetHandler) Request(w http.ResponseWriter, r *http.Request) {
 	var req RequestPasswordResetRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "Invalid request body", http.StatusBadRequest)
+	if !decodeJSONRequest(w, r, &req, false) {
 		return
 	}
 
@@ -81,8 +80,7 @@ func (h *PasswordResetHandler) Request(w http.ResponseWriter, r *http.Request) {
 
 func (h *PasswordResetHandler) Verify(w http.ResponseWriter, r *http.Request) {
 	var req VerifyPasswordResetRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "Invalid request body", http.StatusBadRequest)
+	if !decodeJSONRequest(w, r, &req, false) {
 		return
 	}
 
@@ -112,8 +110,7 @@ func (h *PasswordResetHandler) Verify(w http.ResponseWriter, r *http.Request) {
 
 func (h *PasswordResetHandler) Confirm(w http.ResponseWriter, r *http.Request) {
 	var req ConfirmPasswordResetRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "Invalid request body", http.StatusBadRequest)
+	if !decodeJSONRequest(w, r, &req, false) {
 		return
 	}
 

@@ -72,8 +72,7 @@ func NewAuthHandler(
 func (h *AuthHandler) RegisterUser(w http.ResponseWriter, r *http.Request) {
 	var req RegisterRequest
 	var pgErr *pgconn.PgError
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "Invalid request body", http.StatusBadRequest)
+	if !decodeJSONRequest(w, r, &req, false) {
 		return
 	}
 
@@ -124,8 +123,7 @@ func (h *AuthHandler) RegisterUser(w http.ResponseWriter, r *http.Request) {
 }
 func (h *AuthHandler) LoginUser(w http.ResponseWriter, r *http.Request) {
 	var req LoginRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "Invalid request body", http.StatusBadRequest)
+	if !decodeJSONRequest(w, r, &req, false) {
 		return
 	}
 	req.Email = strings.ToLower(strings.TrimSpace(req.Email))

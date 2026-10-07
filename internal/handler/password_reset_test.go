@@ -328,6 +328,7 @@ func newTestPasswordResetHandler(service passwordResetService) *PasswordResetHan
 
 func performPasswordResetRequest(handler http.HandlerFunc, body string) *httptest.ResponseRecorder {
 	request := httptest.NewRequest(http.MethodPost, "/auth/password-reset", strings.NewReader(body))
+	request.Header.Set("Content-Type", "application/json")
 	recorder := httptest.NewRecorder()
 	handler(recorder, request)
 	return recorder

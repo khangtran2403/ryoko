@@ -62,9 +62,7 @@ func (h *RoomTypeHandler) CreateRoomType(w http.ResponseWriter, r *http.Request)
 	var req CreateRoomTypeRequest
 
 	getHotelid := r.PathValue("hotelID")
-	err := json.NewDecoder(r.Body).Decode(&req)
-	if err != nil {
-		http.Error(w, "Invalid request body", http.StatusBadRequest)
+	if !decodeJSONRequest(w, r, &req, false) {
 		return
 	}
 	convHotelID, err := strconv.ParseInt(getHotelid, 10, 64)
@@ -154,8 +152,7 @@ func (h *RoomTypeHandler) UpdateRoomType(w http.ResponseWriter, r *http.Request)
 		http.Error(w, "Invalid room type ID", http.StatusBadRequest)
 		return
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "Invalid request body", http.StatusBadRequest)
+	if !decodeJSONRequest(w, r, &req, false) {
 		return
 	}
 	if problems := req.Validate(); len(problems) > 0 {

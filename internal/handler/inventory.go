@@ -70,11 +70,7 @@ func (h *InventoryHandler) BlockedInventory(w http.ResponseWriter, r *http.Reque
 		http.Error(w, "Forbidden", http.StatusForbidden)
 		return
 	}
-	decoder := json.NewDecoder(r.Body)
-	decoder.DisallowUnknownFields()
-
-	if err := decoder.Decode(&req); err != nil {
-		http.Error(w, "Invalid request body", http.StatusBadRequest)
+	if !decodeJSONRequest(w, r, &req, true) {
 		return
 	}
 	dateFrom, err := time.Parse(time.DateOnly, req.DateFrom)

@@ -45,9 +45,7 @@ func (h *HotelImageHandler) CreateHotelImage(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	err = json.NewDecoder(r.Body).Decode(&req)
-	if err != nil {
-		http.Error(w, "Invalid request body", http.StatusBadRequest)
+	if !decodeJSONRequest(w, r, &req, false) {
 		return
 	}
 	c, err := h.service.CreateHotelImage(r.Context(), convID, req.ImageURL)

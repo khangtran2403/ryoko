@@ -337,7 +337,7 @@ func performInventoryRequest(
 	body string,
 ) *httptest.ResponseRecorder {
 	request := httptest.NewRequest(method, path, strings.NewReader(body))
-	if body != "" {
+	if method == http.MethodPost || method == http.MethodPut || method == http.MethodPatch {
 		request.Header.Set("Content-Type", "application/json")
 	}
 	if token != "" {

@@ -242,6 +242,7 @@ func performCookieAuthRequest(
 
 func performAuthRequest(handler http.HandlerFunc, body, refreshToken string) *httptest.ResponseRecorder {
 	request := httptest.NewRequest(http.MethodPost, "/auth", strings.NewReader(body))
+	request.Header.Set("Content-Type", "application/json")
 	if refreshToken != "" {
 		request.AddCookie(&http.Cookie{Name: "ryoko_refresh_token", Value: refreshToken, Path: "/auth"})
 	}
