@@ -1,0 +1,1393 @@
+openapi: 3.1.0
+info:
+  title: Ryoko Hotel Booking API
+  version: 1.0.0
+  description: |
+    HTTP API for hotel discovery, room-type availability, bookings, reviews,
+    administration, password reset, and Google OAuth.
+
+    JSON request bodies must use `Content-Type: application/json`, contain one
+    JSON value, and be no larger than 64 KiB. Money inputs and formatted booking
+    responses use decimal strings; generated SQL read models currently encode
+    PostgreSQL numeric values as JSON numbers. Authenticated endpoints use a
+    bearer access token. Refresh tokens are stored in an HttpOnly cookie.
+servers:
+  - url: http://localhost:8080
+    description: Local development
+tags:
+  - name: Health
+  - name: Authentication
+  - name: Users
+  - name: Hotels
+  - name: Room types
+  - name: Amenities
+  - name: Images
+  - name: Availability
+  - name: Bookings
+  - name: Reviews
+  - name: Administration
+
+paths:
+  /health/live:
+    get:
+      tags: [Health]
+      operationId: getLiveness
+      summary: Check whether the API process is alive
+      responses:
+        '200': {$ref: '#/components/responses/Alive'}
+  /health/ready:
+    get:
+      tags: [Health]
+      operationId: getReadiness
+      summary: Check whether the API can reach PostgreSQL
+      responses:
+        '200': {$ref: '#/components/responses/Ready'}
+        '503': {$ref: '#/components/responses/NotReady'}
+
+  /auth/register:
+    post:
+      tags: [Authentication]
+      operationId: registerUser
+      summary: Register a local account
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/RegisterRequest'}
+      responses:
+        '201':
+          description: User registered
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/User'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '413': {$ref: '#/components/responses/BodyTooLarge'}
+        '415': {$ref: '#/components/responses/UnsupportedMediaType'}
+        '429': {$ref: '#/components/responses/TooManyRequests'}
+        '500': {$ref: '#/components/responses/InternalError'}
+  /auth/login:
+    post:
+      tags: [Authentication]
+      operationId: login
+      summary: Create an access and refresh-token session
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/LoginRequest'}
+      responses:
+        '200': {$ref: '#/components/responses/Session'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '413': {$ref: '#/components/responses/BodyTooLarge'}
+        '415': {$ref: '#/components/responses/UnsupportedMediaType'}
+        '429': {$ref: '#/components/responses/TooManyRequests'}
+        '500': {$ref: '#/components/responses/InternalError'}
+  /auth/refresh:
+    post:
+      tags: [Authentication]
+      operationId: refreshSession
+      summary: Rotate the refresh token and issue a new token pair
+      description: Requires the configured frontend Origin and the refresh-token cookie.
+      security: [{refreshCookie: []}]
+      parameters:
+        - {$ref: '#/components/parameters/Origin'}
+      responses:
+        '200': {$ref: '#/components/responses/Session'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '429': {$ref: '#/components/responses/TooManyRequests'}
+        '500': {$ref: '#/components/responses/InternalError'}
+  /auth/logout:
+    post:
+      tags: [Authentication]
+      operationId: logout
+      summary: Revoke the refresh token and clear its cookie
+      description: Idempotent. Requires the configured frontend Origin.
+      security: [{refreshCookie: []}]
+      parameters:
+        - {$ref: '#/components/parameters/Origin'}
+      responses:
+        '204': {$ref: '#/components/responses/NoContent'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '500': {$ref: '#/components/responses/InternalError'}
+  /auth/google:
+    get:
+      tags: [Authentication]
+      operationId: startGoogleOAuth
+      summary: Start a Google OAuth authorization-code flow
+      responses:
+        '302':
+          description: Redirect to Google
+          headers:
+            Location: {schema: {type: string, format: uri}}
+        '500': {$ref: '#/components/responses/InternalError'}
+  /auth/google/callback:
+    get:
+      tags: [Authentication]
+      operationId: finishGoogleOAuth
+      summary: Process Google's callback and redirect with a short-lived Ryoko code
+      parameters:
+        - {name: state, in: query, schema: {type: string}}
+        - {name: code, in: query, schema: {type: string}}
+        - {name: error, in: query, schema: {type: string}}
+      responses:
+        '302':
+          description: Redirect to the frontend with a one-time `code` query parameter
+          headers:
+            Location: {schema: {type: string, format: uri}}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '500': {$ref: '#/components/responses/InternalError'}
+  /auth/oauth/exchange:
+    post:
+      tags: [Authentication]
+      operationId: exchangeOAuthCode
+      summary: Exchange a one-time OAuth code for a Ryoko session
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/OAuthCodeRequest'}
+      responses:
+        '200': {$ref: '#/components/responses/Session'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '413': {$ref: '#/components/responses/BodyTooLarge'}
+        '415': {$ref: '#/components/responses/UnsupportedMediaType'}
+        '429': {$ref: '#/components/responses/TooManyRequests'}
+        '500': {$ref: '#/components/responses/InternalError'}
+  /auth/password-reset/request:
+    post:
+      tags: [Authentication]
+      operationId: requestPasswordReset
+      summary: Request a password-reset verification code
+      description: Always returns the same accepted response for a syntactically valid email.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/PasswordResetRequest'}
+      responses:
+        '202':
+          description: Request accepted
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Message'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '413': {$ref: '#/components/responses/BodyTooLarge'}
+        '415': {$ref: '#/components/responses/UnsupportedMediaType'}
+        '429': {$ref: '#/components/responses/TooManyRequests'}
+  /auth/password-reset/verify:
+    post:
+      tags: [Authentication]
+      operationId: verifyPasswordReset
+      summary: Verify the emailed six-digit code
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/PasswordResetVerifyRequest'}
+      responses:
+        '200':
+          description: Verification succeeded
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/PasswordResetVerifyResponse'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '413': {$ref: '#/components/responses/BodyTooLarge'}
+        '415': {$ref: '#/components/responses/UnsupportedMediaType'}
+        '429': {$ref: '#/components/responses/TooManyRequests'}
+        '500': {$ref: '#/components/responses/InternalError'}
+  /auth/password-reset/confirm:
+    post:
+      tags: [Authentication]
+      operationId: confirmPasswordReset
+      summary: Set a new password using a reset token
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/PasswordResetConfirmRequest'}
+      responses:
+        '204': {$ref: '#/components/responses/NoContent'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '413': {$ref: '#/components/responses/BodyTooLarge'}
+        '415': {$ref: '#/components/responses/UnsupportedMediaType'}
+        '429': {$ref: '#/components/responses/TooManyRequests'}
+        '500': {$ref: '#/components/responses/InternalError'}
+
+  /me:
+    get:
+      tags: [Users]
+      operationId: getCurrentUser
+      security: [{bearerAuth: []}]
+      responses:
+        '200':
+          description: Current user
+          content: {application/json: {schema: {$ref: '#/components/schemas/User'}}}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '500': {$ref: '#/components/responses/InternalError'}
+    put:
+      tags: [Users]
+      operationId: updateCurrentUser
+      security: [{bearerAuth: []}]
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/UserProfileRequest'}}}
+      responses:
+        '200':
+          description: Updated user
+          content: {application/json: {schema: {$ref: '#/components/schemas/User'}}}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '413': {$ref: '#/components/responses/BodyTooLarge'}
+        '415': {$ref: '#/components/responses/UnsupportedMediaType'}
+        '500': {$ref: '#/components/responses/InternalError'}
+    delete:
+      tags: [Users]
+      operationId: deleteCurrentUser
+      security: [{bearerAuth: []}]
+      responses:
+        '204': {$ref: '#/components/responses/NoContent'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '500': {$ref: '#/components/responses/InternalError'}
+
+  /hotels:
+    get:
+      tags: [Hotels]
+      operationId: listHotelsByCity
+      parameters:
+        - {name: city, in: query, required: true, schema: {type: string, minLength: 1}}
+      responses:
+        '200':
+          description: Hotels in the city
+          content:
+            application/json:
+              schema: {type: array, items: {$ref: '#/components/schemas/Hotel'}}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '500': {$ref: '#/components/responses/InternalError'}
+    post:
+      tags: [Hotels, Administration]
+      operationId: createHotel
+      summary: Create a hotel (admin only)
+      security: [{bearerAuth: []}]
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/HotelRequest'}}}
+      responses:
+        '201':
+          description: Hotel created
+          content: {application/json: {schema: {$ref: '#/components/schemas/Hotel'}}}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '413': {$ref: '#/components/responses/BodyTooLarge'}
+        '415': {$ref: '#/components/responses/UnsupportedMediaType'}
+        '500': {$ref: '#/components/responses/InternalError'}
+  /hotels/search:
+    get:
+      tags: [Availability]
+      operationId: searchAvailableHotels
+      summary: Search hotels with available room types
+      parameters:
+        - {name: city, in: query, required: true, schema: {type: string, minLength: 1}}
+        - {$ref: '#/components/parameters/CheckIn'}
+        - {$ref: '#/components/parameters/CheckOut'}
+        - {$ref: '#/components/parameters/RoomsCount'}
+        - {$ref: '#/components/parameters/GuestCount'}
+        - {$ref: '#/components/parameters/Page'}
+        - {$ref: '#/components/parameters/PageSize'}
+        - name: sort
+          in: query
+          schema: {type: string, enum: [price_asc, price_desc], default: price_asc}
+      responses:
+        '200':
+          description: Available hotels
+          content: {application/json: {schema: {$ref: '#/components/schemas/HotelSearchResult'}}}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '500': {$ref: '#/components/responses/InternalError'}
+  /hotels/{id}:
+    parameters:
+      - {$ref: '#/components/parameters/HotelPathID'}
+    get:
+      tags: [Hotels]
+      operationId: getHotel
+      responses:
+        '200':
+          description: Hotel details
+          content: {application/json: {schema: {$ref: '#/components/schemas/HotelDetails'}}}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '500': {$ref: '#/components/responses/InternalError'}
+    put:
+      tags: [Hotels, Administration]
+      operationId: updateHotel
+      security: [{bearerAuth: []}]
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/HotelRequest'}}}
+      responses:
+        '200':
+          description: Updated hotel
+          content: {application/json: {schema: {$ref: '#/components/schemas/Hotel'}}}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '413': {$ref: '#/components/responses/BodyTooLarge'}
+        '415': {$ref: '#/components/responses/UnsupportedMediaType'}
+        '500': {$ref: '#/components/responses/InternalError'}
+    delete:
+      tags: [Hotels, Administration]
+      operationId: deleteHotel
+      security: [{bearerAuth: []}]
+      responses:
+        '204': {$ref: '#/components/responses/NoContent'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '500': {$ref: '#/components/responses/InternalError'}
+
+  /hotels/{hotelID}/room-types:
+    parameters:
+      - {$ref: '#/components/parameters/HotelID'}
+    get:
+      tags: [Room types]
+      operationId: listHotelRoomTypes
+      responses:
+        '200':
+          description: Room types
+          content: {application/json: {schema: {type: array, items: {$ref: '#/components/schemas/RoomType'}}}}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '500': {$ref: '#/components/responses/InternalError'}
+    post:
+      tags: [Room types, Administration]
+      operationId: createRoomType
+      security: [{bearerAuth: []}]
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/RoomTypeRequest'}}}
+      responses:
+        '201':
+          description: Room type created
+          content: {application/json: {schema: {$ref: '#/components/schemas/RoomType'}}}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '413': {$ref: '#/components/responses/BodyTooLarge'}
+        '415': {$ref: '#/components/responses/UnsupportedMediaType'}
+        '500': {$ref: '#/components/responses/InternalError'}
+  /room-types/{id}:
+    parameters:
+      - {$ref: '#/components/parameters/RoomTypePathID'}
+    get:
+      tags: [Room types]
+      operationId: getRoomType
+      responses:
+        '200':
+          description: Room type
+          content: {application/json: {schema: {$ref: '#/components/schemas/RoomType'}}}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '500': {$ref: '#/components/responses/InternalError'}
+    put:
+      tags: [Room types, Administration]
+      operationId: updateRoomType
+      security: [{bearerAuth: []}]
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/RoomTypeRequest'}}}
+      responses:
+        '200':
+          description: Updated room type
+          content: {application/json: {schema: {$ref: '#/components/schemas/RoomType'}}}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '413': {$ref: '#/components/responses/BodyTooLarge'}
+        '415': {$ref: '#/components/responses/UnsupportedMediaType'}
+        '500': {$ref: '#/components/responses/InternalError'}
+    delete:
+      tags: [Room types, Administration]
+      operationId: deleteRoomType
+      security: [{bearerAuth: []}]
+      responses:
+        '204': {$ref: '#/components/responses/NoContent'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '500': {$ref: '#/components/responses/InternalError'}
+  /hotels/{hotelID}/available-room-types:
+    parameters:
+      - {$ref: '#/components/parameters/HotelID'}
+      - {$ref: '#/components/parameters/CheckIn'}
+      - {$ref: '#/components/parameters/CheckOut'}
+      - {$ref: '#/components/parameters/RoomsCount'}
+      - {$ref: '#/components/parameters/GuestCount'}
+    get:
+      tags: [Availability]
+      operationId: listAvailableRoomTypes
+      responses:
+        '200':
+          description: Available room types
+          content: {application/json: {schema: {type: array, items: {$ref: '#/components/schemas/AvailableRoomType'}}}}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '500': {$ref: '#/components/responses/InternalError'}
+
+  /amenities:
+    get:
+      tags: [Amenities]
+      operationId: listAmenities
+      responses:
+        '200':
+          description: Amenities
+          content: {application/json: {schema: {type: array, items: {$ref: '#/components/schemas/Amenity'}}}}
+        '500': {$ref: '#/components/responses/InternalError'}
+    post:
+      tags: [Amenities, Administration]
+      operationId: createAmenity
+      security: [{bearerAuth: []}]
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/AmenityRequest'}}}
+      responses:
+        '201':
+          description: Amenity created
+          content: {application/json: {schema: {$ref: '#/components/schemas/Amenity'}}}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '413': {$ref: '#/components/responses/BodyTooLarge'}
+        '415': {$ref: '#/components/responses/UnsupportedMediaType'}
+        '500': {$ref: '#/components/responses/InternalError'}
+  /amenities/{amenityID}:
+    parameters:
+      - {$ref: '#/components/parameters/AmenityID'}
+    put:
+      tags: [Amenities, Administration]
+      operationId: updateAmenity
+      security: [{bearerAuth: []}]
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/AmenityRequest'}}}
+      responses:
+        '200':
+          description: Updated amenity
+          content: {application/json: {schema: {$ref: '#/components/schemas/Amenity'}}}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '413': {$ref: '#/components/responses/BodyTooLarge'}
+        '415': {$ref: '#/components/responses/UnsupportedMediaType'}
+        '500': {$ref: '#/components/responses/InternalError'}
+    delete:
+      tags: [Amenities, Administration]
+      operationId: deleteAmenity
+      security: [{bearerAuth: []}]
+      responses:
+        '204': {$ref: '#/components/responses/NoContent'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '500': {$ref: '#/components/responses/InternalError'}
+  /hotels/{hotelID}/amenities:
+    parameters:
+      - {$ref: '#/components/parameters/HotelID'}
+    get:
+      tags: [Amenities]
+      operationId: listHotelAmenities
+      responses:
+        '200':
+          description: Hotel amenities
+          content: {application/json: {schema: {type: array, items: {$ref: '#/components/schemas/Amenity'}}}}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '500': {$ref: '#/components/responses/InternalError'}
+    post:
+      tags: [Amenities, Administration]
+      operationId: addHotelAmenity
+      security: [{bearerAuth: []}]
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/AttachAmenityRequest'}}}
+      responses:
+        '201':
+          description: Amenity attached
+          content: {application/json: {schema: {$ref: '#/components/schemas/HotelAmenity'}}}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '413': {$ref: '#/components/responses/BodyTooLarge'}
+        '415': {$ref: '#/components/responses/UnsupportedMediaType'}
+        '500': {$ref: '#/components/responses/InternalError'}
+  /hotels/{hotelID}/amenities/{amenityID}:
+    parameters:
+      - {$ref: '#/components/parameters/HotelID'}
+      - {$ref: '#/components/parameters/AmenityID'}
+    delete:
+      tags: [Amenities, Administration]
+      operationId: removeHotelAmenity
+      security: [{bearerAuth: []}]
+      responses:
+        '204': {$ref: '#/components/responses/NoContent'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '500': {$ref: '#/components/responses/InternalError'}
+
+  /hotels/{hotelID}/images:
+    parameters:
+      - {$ref: '#/components/parameters/HotelID'}
+    get:
+      tags: [Images]
+      operationId: listHotelImages
+      responses:
+        '200':
+          description: Hotel images
+          content: {application/json: {schema: {type: array, items: {$ref: '#/components/schemas/HotelImage'}}}}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '500': {$ref: '#/components/responses/InternalError'}
+    post:
+      tags: [Images, Administration]
+      operationId: createHotelImage
+      security: [{bearerAuth: []}]
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/HotelImageRequest'}}}
+      responses:
+        '201':
+          description: Image created
+          content: {application/json: {schema: {$ref: '#/components/schemas/HotelImage'}}}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '413': {$ref: '#/components/responses/BodyTooLarge'}
+        '415': {$ref: '#/components/responses/UnsupportedMediaType'}
+        '500': {$ref: '#/components/responses/InternalError'}
+  /hotels/{hotelID}/images/{imageID}/primary:
+    parameters:
+      - {$ref: '#/components/parameters/HotelID'}
+      - {$ref: '#/components/parameters/ImageID'}
+    put:
+      tags: [Images, Administration]
+      operationId: setPrimaryHotelImage
+      security: [{bearerAuth: []}]
+      responses:
+        '200':
+          description: Primary image updated
+          content: {application/json: {schema: {$ref: '#/components/schemas/HotelImage'}}}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '500': {$ref: '#/components/responses/InternalError'}
+  /hotels/{hotelID}/images/{imageID}:
+    parameters:
+      - {$ref: '#/components/parameters/HotelID'}
+      - {$ref: '#/components/parameters/ImageID'}
+    delete:
+      tags: [Images, Administration]
+      operationId: deleteHotelImage
+      security: [{bearerAuth: []}]
+      responses:
+        '204': {$ref: '#/components/responses/NoContent'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '500': {$ref: '#/components/responses/InternalError'}
+
+  /room-types/{roomTypeID}/bookings:
+    parameters:
+      - {$ref: '#/components/parameters/RoomTypeID'}
+    post:
+      tags: [Bookings]
+      operationId: createBooking
+      security: [{bearerAuth: []}]
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema: {type: string, minLength: 1, maxLength: 255}
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/CreateBookingRequest'}}}
+      responses:
+        '201':
+          description: Booking confirmed
+          content: {application/json: {schema: {$ref: '#/components/schemas/Booking'}}}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '413': {$ref: '#/components/responses/BodyTooLarge'}
+        '415': {$ref: '#/components/responses/UnsupportedMediaType'}
+        '500': {$ref: '#/components/responses/InternalError'}
+  /me/bookings:
+    get:
+      tags: [Bookings]
+      operationId: listCurrentUserBookings
+      security: [{bearerAuth: []}]
+      parameters:
+        - {$ref: '#/components/parameters/Page'}
+        - {$ref: '#/components/parameters/PageSize'}
+      responses:
+        '200':
+          description: User bookings
+          content: {application/json: {schema: {$ref: '#/components/schemas/BookingList'}}}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '500': {$ref: '#/components/responses/InternalError'}
+  /me/bookings/{bookingID}:
+    parameters:
+      - {$ref: '#/components/parameters/BookingID'}
+    get:
+      tags: [Bookings]
+      operationId: getCurrentUserBooking
+      security: [{bearerAuth: []}]
+      responses:
+        '200':
+          description: Booking
+          content: {application/json: {schema: {$ref: '#/components/schemas/Booking'}}}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '500': {$ref: '#/components/responses/InternalError'}
+  /me/bookings/{bookingID}/cancel:
+    parameters:
+      - {$ref: '#/components/parameters/BookingID'}
+    post:
+      tags: [Bookings]
+      operationId: cancelCurrentUserBooking
+      security: [{bearerAuth: []}]
+      responses:
+        '200':
+          description: Cancelled booking
+          content: {application/json: {schema: {$ref: '#/components/schemas/Booking'}}}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '500': {$ref: '#/components/responses/InternalError'}
+  /me/bookings/{bookingID}/history:
+    parameters:
+      - {$ref: '#/components/parameters/BookingID'}
+    get:
+      tags: [Bookings]
+      operationId: listCurrentUserBookingHistory
+      security: [{bearerAuth: []}]
+      responses:
+        '200':
+          description: Booking status history
+          content: {application/json: {schema: {type: array, items: {$ref: '#/components/schemas/BookingStatusHistory'}}}}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '500': {$ref: '#/components/responses/InternalError'}
+
+  /me/bookings/{bookingID}/review:
+    parameters:
+      - {$ref: '#/components/parameters/BookingID'}
+    post:
+      tags: [Reviews]
+      operationId: createReview
+      security: [{bearerAuth: []}]
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/ReviewRequest'}}}
+      responses:
+        '201':
+          description: Review created
+          content: {application/json: {schema: {$ref: '#/components/schemas/Review'}}}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '413': {$ref: '#/components/responses/BodyTooLarge'}
+        '415': {$ref: '#/components/responses/UnsupportedMediaType'}
+        '500': {$ref: '#/components/responses/InternalError'}
+  /reviews/{reviewID}:
+    parameters:
+      - {$ref: '#/components/parameters/ReviewID'}
+    get:
+      tags: [Reviews]
+      operationId: getReview
+      responses:
+        '200':
+          description: Review
+          content: {application/json: {schema: {$ref: '#/components/schemas/ReviewDetails'}}}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '500': {$ref: '#/components/responses/InternalError'}
+  /hotels/{hotelID}/reviews:
+    parameters:
+      - {$ref: '#/components/parameters/HotelID'}
+    get:
+      tags: [Reviews]
+      operationId: listHotelReviews
+      parameters:
+        - {$ref: '#/components/parameters/Page'}
+        - {$ref: '#/components/parameters/PageSize'}
+      responses:
+        '200':
+          description: Hotel reviews
+          content: {application/json: {schema: {$ref: '#/components/schemas/ReviewList'}}}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '500': {$ref: '#/components/responses/InternalError'}
+  /me/reviews/{reviewID}:
+    parameters:
+      - {$ref: '#/components/parameters/ReviewID'}
+    put:
+      tags: [Reviews]
+      operationId: updateCurrentUserReview
+      description: A review can be edited only once.
+      security: [{bearerAuth: []}]
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/ReviewRequest'}}}
+      responses:
+        '200':
+          description: Updated review
+          content: {application/json: {schema: {$ref: '#/components/schemas/Review'}}}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '413': {$ref: '#/components/responses/BodyTooLarge'}
+        '415': {$ref: '#/components/responses/UnsupportedMediaType'}
+        '500': {$ref: '#/components/responses/InternalError'}
+    delete:
+      tags: [Reviews]
+      operationId: deleteCurrentUserReview
+      security: [{bearerAuth: []}]
+      responses:
+        '204': {$ref: '#/components/responses/NoContent'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '500': {$ref: '#/components/responses/InternalError'}
+
+  /admin/bookings:
+    get:
+      tags: [Administration]
+      operationId: listBookingsForAdmin
+      security: [{bearerAuth: []}]
+      parameters:
+        - {name: hotel_id, in: query, schema: {type: integer, format: int64, minimum: 1}}
+        - {name: status, in: query, schema: {$ref: '#/components/schemas/BookingStatus'}}
+        - {name: check_in_from, in: query, schema: {type: string, format: date}}
+        - {name: check_in_to, in: query, schema: {type: string, format: date}}
+        - {$ref: '#/components/parameters/Page'}
+        - {$ref: '#/components/parameters/PageSize'}
+      responses:
+        '200':
+          description: Filtered bookings
+          content: {application/json: {schema: {$ref: '#/components/schemas/AdminBookingList'}}}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '500': {$ref: '#/components/responses/InternalError'}
+  /admin/bookings/{bookingID}/history:
+    parameters:
+      - {$ref: '#/components/parameters/BookingID'}
+    get:
+      tags: [Administration]
+      operationId: listBookingHistoryForAdmin
+      security: [{bearerAuth: []}]
+      responses:
+        '200':
+          description: Booking status history
+          content: {application/json: {schema: {type: array, items: {$ref: '#/components/schemas/BookingStatusHistory'}}}}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '500': {$ref: '#/components/responses/InternalError'}
+  /admin/bookings/{bookingID}/cancel:
+    parameters:
+      - {$ref: '#/components/parameters/BookingID'}
+    post:
+      tags: [Administration]
+      operationId: cancelBookingAsAdmin
+      security: [{bearerAuth: []}]
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/AdminCancellationRequest'}}}
+      responses:
+        '200':
+          description: Cancelled booking
+          content: {application/json: {schema: {$ref: '#/components/schemas/Booking'}}}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '413': {$ref: '#/components/responses/BodyTooLarge'}
+        '415': {$ref: '#/components/responses/UnsupportedMediaType'}
+        '500': {$ref: '#/components/responses/InternalError'}
+  /admin/room-types/{roomTypeID}/blocked-inventory:
+    parameters:
+      - {$ref: '#/components/parameters/RoomTypeID'}
+    put:
+      tags: [Administration, Availability]
+      operationId: setBlockedInventory
+      security: [{bearerAuth: []}]
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/BlockedInventoryRequest'}}}
+      responses:
+        '200':
+          description: Updated inventory range
+          content: {application/json: {schema: {$ref: '#/components/schemas/InventoryResult'}}}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '413': {$ref: '#/components/responses/BodyTooLarge'}
+        '415': {$ref: '#/components/responses/UnsupportedMediaType'}
+        '500': {$ref: '#/components/responses/InternalError'}
+  /admin/room-types/{roomTypeID}/inventory:
+    parameters:
+      - {$ref: '#/components/parameters/RoomTypeID'}
+    get:
+      tags: [Administration, Availability]
+      operationId: listRoomTypeInventory
+      security: [{bearerAuth: []}]
+      parameters:
+        - {name: date_from, in: query, required: true, schema: {type: string, format: date}}
+        - {name: date_to, in: query, required: true, schema: {type: string, format: date}}
+      responses:
+        '200':
+          description: Inventory range
+          content: {application/json: {schema: {$ref: '#/components/schemas/InventoryResult'}}}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '500': {$ref: '#/components/responses/InternalError'}
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+    refreshCookie:
+      type: apiKey
+      in: cookie
+      name: ryoko_refresh_token
+
+  parameters:
+    Origin:
+      name: Origin
+      in: header
+      required: true
+      schema: {type: string, format: uri}
+    HotelID:
+      name: hotelID
+      in: path
+      required: true
+      schema: {type: integer, format: int64, minimum: 1}
+    HotelPathID:
+      name: id
+      in: path
+      required: true
+      schema: {type: integer, format: int64, minimum: 1}
+    RoomTypeID:
+      name: roomTypeID
+      in: path
+      required: true
+      schema: {type: integer, format: int64, minimum: 1}
+    RoomTypePathID:
+      name: id
+      in: path
+      required: true
+      schema: {type: integer, format: int64, minimum: 1}
+    AmenityID:
+      name: amenityID
+      in: path
+      required: true
+      schema: {type: integer, format: int64, minimum: 1}
+    ImageID:
+      name: imageID
+      in: path
+      required: true
+      schema: {type: integer, format: int64, minimum: 1}
+    BookingID:
+      name: bookingID
+      in: path
+      required: true
+      schema: {type: integer, format: int64, minimum: 1}
+    ReviewID:
+      name: reviewID
+      in: path
+      required: true
+      schema: {type: integer, format: int64, minimum: 1}
+    CheckIn:
+      name: check_in
+      in: query
+      required: true
+      schema: {type: string, format: date}
+    CheckOut:
+      name: check_out
+      in: query
+      required: true
+      schema: {type: string, format: date}
+    RoomsCount:
+      name: rooms_count
+      in: query
+      required: true
+      schema: {type: integer, format: int32, minimum: 1}
+    GuestCount:
+      name: guest_count
+      in: query
+      required: true
+      schema: {type: integer, format: int32, minimum: 1}
+    Page:
+      name: page
+      in: query
+      schema: {type: integer, format: int32, minimum: 1, default: 1}
+    PageSize:
+      name: page_size
+      in: query
+      schema: {type: integer, format: int32, minimum: 1, maximum: 100, default: 20}
+
+  responses:
+    Alive:
+      description: Process is alive
+      headers: {Cache-Control: {schema: {type: string, const: no-store}}}
+      content: {text/plain: {schema: {type: string, const: "alive\n"}}}
+    Ready:
+      description: API and PostgreSQL are ready
+      headers: {Cache-Control: {schema: {type: string, const: no-store}}}
+      content: {text/plain: {schema: {type: string, const: "ready\n"}}}
+    NotReady:
+      description: PostgreSQL is unavailable
+      content: {text/plain: {schema: {type: string, const: "not ready\n"}}}
+    Session:
+      description: Session created; refresh token is set as an HttpOnly cookie
+      headers:
+        Set-Cookie: {schema: {type: string}}
+      content: {application/json: {schema: {$ref: '#/components/schemas/Session'}}}
+    NoContent: {description: Successful response with no body}
+    BadRequest: {$ref: '#/components/responses/TextBadRequest'}
+    TextBadRequest:
+      description: Invalid request
+      content:
+        text/plain: {schema: {$ref: '#/components/schemas/ErrorText'}}
+        application/json: {schema: {$ref: '#/components/schemas/ValidationErrors'}}
+    Unauthorized:
+      description: Authentication failed
+      headers: {WWW-Authenticate: {schema: {type: string}}}
+      content: {text/plain: {schema: {$ref: '#/components/schemas/ErrorText'}}}
+    Forbidden:
+      description: Authenticated caller is not allowed
+      content: {text/plain: {schema: {$ref: '#/components/schemas/ErrorText'}}}
+    NotFound:
+      description: Resource not found
+      content: {text/plain: {schema: {$ref: '#/components/schemas/ErrorText'}}}
+    Conflict:
+      description: Request conflicts with current resource state
+      content: {text/plain: {schema: {$ref: '#/components/schemas/ErrorText'}}}
+    BodyTooLarge:
+      description: JSON body exceeds 64 KiB
+      content: {text/plain: {schema: {type: string, const: "Request body too large\n"}}}
+    UnsupportedMediaType:
+      description: Content-Type is not application/json
+      content: {text/plain: {schema: {type: string, const: "Content-Type must be application/json\n"}}}
+    TooManyRequests:
+      description: Rate limit exceeded
+      headers: {Retry-After: {schema: {type: integer, minimum: 1}}}
+      content: {text/plain: {schema: {$ref: '#/components/schemas/ErrorText'}}}
+    InternalError:
+      description: Internal server error
+      content: {text/plain: {schema: {$ref: '#/components/schemas/ErrorText'}}}
+
+  schemas:
+    ErrorText: {type: string, description: Plain-text error ending with a newline}
+    Message:
+      type: object
+      required: [message]
+      properties: {message: {type: string}}
+    ValidationErrors:
+      type: object
+      required: [errors]
+      properties:
+        errors: {type: array, items: {type: string}}
+    DecimalMoney:
+      type: string
+      pattern: '^\d+(\.\d{1,2})?$'
+      examples: ['1750000.00']
+    NumericMoney:
+      type: number
+      minimum: 0
+      examples: [1750000.00]
+    BookingStatus: {type: string, enum: [confirmed, cancelled, completed]}
+    Pagination:
+      type: object
+      required: [page, page_size, has_more]
+      properties:
+        page: {type: integer, format: int32, minimum: 1}
+        page_size: {type: integer, format: int32, minimum: 1, maximum: 100}
+        has_more: {type: boolean}
+    RegisterRequest:
+      type: object
+      required: [email, password, full_name]
+      properties:
+        email: {type: string, format: email}
+        password: {type: string, format: password, minLength: 8}
+        full_name: {type: string, minLength: 1}
+        phone: {type: string}
+    LoginRequest:
+      type: object
+      required: [email, password]
+      properties:
+        email: {type: string, format: email}
+        password: {type: string, format: password}
+    Session:
+      type: object
+      required: [access_token, token_type, expires_in, refresh_expires_at]
+      properties:
+        access_token: {type: string}
+        token_type: {type: string, const: Bearer}
+        expires_in: {type: integer, format: int64, description: Seconds until access-token expiry}
+        refresh_expires_at: {type: string, format: date-time}
+    OAuthCodeRequest:
+      type: object
+      required: [code]
+      properties: {code: {type: string, minLength: 1}}
+    PasswordResetRequest:
+      type: object
+      required: [email]
+      properties: {email: {type: string, format: email}}
+    PasswordResetVerifyRequest:
+      type: object
+      required: [email, otp]
+      properties:
+        email: {type: string, format: email}
+        otp: {type: string, pattern: '^\d{6}$'}
+    PasswordResetVerifyResponse:
+      type: object
+      required: [reset_token, expires_at]
+      properties:
+        reset_token: {type: string}
+        expires_at: {type: string, format: date-time}
+    PasswordResetConfirmRequest:
+      type: object
+      required: [reset_token, new_password]
+      properties:
+        reset_token: {type: string, minLength: 1}
+        new_password: {type: string, format: password, minLength: 8}
+    UserProfileRequest:
+      type: object
+      required: [email, full_name]
+      properties:
+        email: {type: string, format: email}
+        full_name: {type: string, minLength: 1}
+        phone: {type: string}
+    User:
+      type: object
+      required: [id, email, full_name, role, created_at, updated_at]
+      properties:
+        id: {type: integer, format: int64}
+        email: {type: string, format: email}
+        full_name: {type: string}
+        phone: {type: [string, 'null']}
+        role: {type: string, enum: [user, admin]}
+        created_at: {type: string, format: date-time}
+        updated_at: {type: string, format: date-time}
+    HotelRequest:
+      type: object
+      required: [name, address, city]
+      properties:
+        name: {type: string, minLength: 1}
+        address: {type: string, minLength: 1}
+        city: {type: string, minLength: 1}
+        description: {type: string}
+    Hotel:
+      type: object
+      required: [id, name, address, city, is_active, created_at]
+      properties:
+        id: {type: integer, format: int64}
+        name: {type: string}
+        address: {type: string}
+        city: {type: string}
+        description: {type: [string, 'null']}
+        is_active: {type: boolean}
+        created_at: {type: string, format: date-time}
+    HotelDetails:
+      type: object
+      required: [id, name, address, city, images, amenities, room_types, review_summary]
+      properties:
+        id: {type: integer, format: int64}
+        name: {type: string}
+        address: {type: string}
+        city: {type: string}
+        description: {type: [string, 'null']}
+        images: {type: array, items: {$ref: '#/components/schemas/HotelImage'}}
+        amenities: {type: array, items: {$ref: '#/components/schemas/Amenity'}}
+        room_types: {type: array, items: {$ref: '#/components/schemas/RoomType'}}
+        review_summary: {$ref: '#/components/schemas/ReviewSummary'}
+    ReviewSummary:
+      type: object
+      required: [average_rating, review_count]
+      properties:
+        average_rating:
+          oneOf: [{$ref: '#/components/schemas/NumericMoney'}, {type: 'null'}]
+        review_count: {type: integer, format: int32, minimum: 0}
+    RoomTypeRequest:
+      type: object
+      required: [name, price_per_night, capacity, total_rooms]
+      properties:
+        name: {type: string, minLength: 1}
+        description: {type: string}
+        price_per_night: {$ref: '#/components/schemas/DecimalMoney'}
+        capacity: {type: integer, format: int32, minimum: 1}
+        total_rooms: {type: integer, format: int32, minimum: 1}
+    RoomType:
+      type: object
+      required: [id, hotel_id, name, price_per_night, capacity, total_rooms, is_active, created_at]
+      properties:
+        id: {type: integer, format: int64}
+        hotel_id: {type: integer, format: int64}
+        name: {type: string}
+        description: {type: [string, 'null']}
+        price_per_night: {$ref: '#/components/schemas/NumericMoney'}
+        capacity: {type: integer, format: int32}
+        total_rooms: {type: integer, format: int32}
+        is_active: {type: boolean}
+        created_at: {type: string, format: date-time}
+    AvailableRoomType:
+      type: object
+      required: [id, hotel_id, name, price_per_night, capacity, total_rooms, created_at, rooms_available]
+      properties:
+        id: {type: integer, format: int64}
+        hotel_id: {type: integer, format: int64}
+        name: {type: string}
+        description: {type: [string, 'null']}
+        price_per_night: {$ref: '#/components/schemas/NumericMoney'}
+        capacity: {type: integer, format: int32}
+        total_rooms: {type: integer, format: int32}
+        created_at: {type: string, format: date-time}
+        rooms_available: {type: integer, format: int32, minimum: 0}
+    AmenityRequest:
+      type: object
+      required: [name]
+      properties: {name: {type: string, minLength: 1}}
+    AttachAmenityRequest:
+      type: object
+      required: [amenity_id]
+      properties: {amenity_id: {type: integer, format: int64, minimum: 1}}
+    Amenity:
+      type: object
+      required: [id, name, created_at]
+      properties:
+        id: {type: integer, format: int64}
+        name: {type: string}
+        created_at: {type: string, format: date-time}
+    HotelAmenity:
+      type: object
+      required: [hotel_id, amenity_id]
+      properties:
+        hotel_id: {type: integer, format: int64}
+        amenity_id: {type: integer, format: int64}
+    HotelImageRequest:
+      type: object
+      required: [image_url]
+      properties: {image_url: {type: string, format: uri}}
+    HotelImage:
+      type: object
+      required: [id, hotel_id, image_url, is_primary, created_at]
+      properties:
+        id: {type: integer, format: int64}
+        hotel_id: {type: integer, format: int64}
+        image_url: {type: string, format: uri}
+        is_primary: {type: boolean}
+        created_at: {type: string, format: date-time}
+    HotelSearchItem:
+      type: object
+      required: [id, name, address, city, starting_price, available_room_type_count, created_at]
+      properties:
+        id: {type: integer, format: int64}
+        name: {type: string}
+        address: {type: string}
+        city: {type: string}
+        description: {type: [string, 'null']}
+        primary_image_url: {type: [string, 'null'], format: uri}
+        starting_price: {$ref: '#/components/schemas/NumericMoney'}
+        available_room_type_count: {type: integer, format: int32, minimum: 0}
+        created_at: {type: string, format: date-time}
+    HotelSearchResult:
+      type: object
+      required: [hotels, pagination]
+      properties:
+        hotels: {type: array, items: {$ref: '#/components/schemas/HotelSearchItem'}}
+        pagination: {$ref: '#/components/schemas/Pagination'}
+    CreateBookingRequest:
+      type: object
+      required: [check_in, check_out, rooms_count, guest_count]
+      properties:
+        check_in: {type: string, format: date}
+        check_out: {type: string, format: date}
+        rooms_count: {type: integer, format: int32, minimum: 1}
+        guest_count: {type: integer, format: int32, minimum: 1}
+    Booking:
+      type: object
+      required: [id, user_id, room_type_id, check_in, check_out, number_of_nights, rooms_count, guest_count, price_per_night, total_price, status, created_at, updated_at]
+      properties:
+        id: {type: integer, format: int64}
+        user_id: {type: integer, format: int64}
+        room_type_id: {type: integer, format: int64}
+        check_in: {type: string, format: date}
+        check_out: {type: string, format: date}
+        number_of_nights: {type: integer, minimum: 1}
+        rooms_count: {type: integer, format: int32, minimum: 1}
+        guest_count: {type: integer, format: int32, minimum: 1}
+        price_per_night: {$ref: '#/components/schemas/DecimalMoney'}
+        total_price: {$ref: '#/components/schemas/DecimalMoney'}
+        status: {$ref: '#/components/schemas/BookingStatus'}
+        created_at: {type: string, format: date-time}
+        updated_at: {type: string, format: date-time}
+    BookingList:
+      type: object
+      required: [bookings, pagination]
+      properties:
+        bookings: {type: array, items: {$ref: '#/components/schemas/Booking'}}
+        pagination: {$ref: '#/components/schemas/Pagination'}
+    BookingStatusHistory:
+      type: object
+      required: [id, booking_id, to_status, created_at]
+      properties:
+        id: {type: integer, format: int64}
+        booking_id: {type: integer, format: int64}
+        from_status:
+          oneOf: [{$ref: '#/components/schemas/BookingStatus'}, {type: 'null'}]
+        to_status: {$ref: '#/components/schemas/BookingStatus'}
+        changed_by_user_id: {type: [integer, 'null'], format: int64}
+        reason: {type: [string, 'null']}
+        created_at: {type: string, format: date-time}
+    AdminBooking:
+      type: object
+      required: [booking_id, user_id, customer_name, customer_email, room_type_id, room_type_name, hotel_id, hotel_name, check_in, check_out, number_of_nights, rooms_count, guest_count, price_per_night, total_price, status, created_at, updated_at]
+      properties:
+        booking_id: {type: integer, format: int64}
+        user_id: {type: integer, format: int64}
+        customer_name: {type: string}
+        customer_email: {type: string, format: email}
+        room_type_id: {type: integer, format: int64}
+        room_type_name: {type: string}
+        hotel_id: {type: integer, format: int64}
+        hotel_name: {type: string}
+        check_in: {type: string, format: date}
+        check_out: {type: string, format: date}
+        number_of_nights: {type: integer, minimum: 1}
+        rooms_count: {type: integer, format: int32, minimum: 1}
+        guest_count: {type: integer, format: int32, minimum: 1}
+        price_per_night: {$ref: '#/components/schemas/DecimalMoney'}
+        total_price: {$ref: '#/components/schemas/DecimalMoney'}
+        status: {$ref: '#/components/schemas/BookingStatus'}
+        created_at: {type: string, format: date-time}
+        updated_at: {type: string, format: date-time}
+    AdminBookingList:
+      type: object
+      required: [bookings, pagination]
+      properties:
+        bookings: {type: array, items: {$ref: '#/components/schemas/AdminBooking'}}
+        pagination: {$ref: '#/components/schemas/Pagination'}
+    AdminCancellationRequest:
+      type: object
+      required: [reason]
+      additionalProperties: false
+      properties: {reason: {type: string, minLength: 1}}
+    ReviewRequest:
+      type: object
+      required: [rating]
+      properties:
+        rating: {type: integer, format: int32, minimum: 1, maximum: 5}
+        comment: {type: [string, 'null']}
+    Review:
+      type: object
+      required: [id, booking_id, rating, created_at, updated_at]
+      properties:
+        id: {type: integer, format: int64}
+        booking_id: {type: integer, format: int64}
+        rating: {type: integer, minimum: 1, maximum: 5}
+        comment: {type: [string, 'null']}
+        created_at: {type: string, format: date-time}
+        updated_at: {type: string, format: date-time}
+        edited_at: {type: [string, 'null'], format: date-time}
+        deleted_at: {type: [string, 'null'], format: date-time}
+    ReviewDetails:
+      type: object
+      required: [id, rating, created_at, updated_at, reviewer_name, room_type_name, hotel_id]
+      properties:
+        id: {type: integer, format: int64}
+        rating: {type: integer, minimum: 1, maximum: 5}
+        comment: {type: [string, 'null']}
+        created_at: {type: string, format: date-time}
+        updated_at: {type: string, format: date-time}
+        reviewer_name: {type: string}
+        room_type_name: {type: string}
+        hotel_id: {type: integer, format: int64}
+    ReviewListItem:
+      type: object
+      required: [id, rating, created_at, updated_at, reviewer_name, room_type_name]
+      properties:
+        id: {type: integer, format: int64}
+        rating: {type: integer, minimum: 1, maximum: 5}
+        comment: {type: [string, 'null']}
+        created_at: {type: string, format: date-time}
+        updated_at: {type: string, format: date-time}
+        reviewer_name: {type: string}
+        room_type_name: {type: string}
+    ReviewList:
+      type: object
+      required: [reviews, pagination]
+      properties:
+        reviews: {type: array, items: {$ref: '#/components/schemas/ReviewListItem'}}
+        pagination: {$ref: '#/components/schemas/Pagination'}
+    BlockedInventoryRequest:
+      type: object
+      required: [date_from, date_to, rooms_blocked, block_reason]
+      additionalProperties: false
+      properties:
+        date_from: {type: string, format: date}
+        date_to: {type: string, format: date}
+        rooms_blocked: {type: integer, format: int32, minimum: 0}
+        block_reason: {type: string}
+    InventoryDay:
+      type: object
+      required: [date, total_rooms, rooms_booked, rooms_blocked, rooms_available, block_reason]
+      properties:
+        date: {type: string, format: date}
+        total_rooms: {type: integer, format: int32, minimum: 0}
+        rooms_booked: {type: integer, format: int32, minimum: 0}
+        rooms_blocked: {type: integer, format: int32, minimum: 0}
+        rooms_available: {type: integer, format: int32, minimum: 0}
+        block_reason: {type: [string, 'null']}
+    InventoryResult:
+      type: object
+      required: [inventory]
+      properties:
+        inventory: {type: array, items: {$ref: '#/components/schemas/InventoryDay'}}
