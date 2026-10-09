@@ -659,7 +659,7 @@ SELECT
     created_at
 FROM booking_status_history
 WHERE booking_id = $1
-ORDER BY created_at ASC, id ASC
+ORDER BY id ASC
 `
 
 func (q *Queries) ListBookingStatusHistoryForAdmin(ctx context.Context, bookingID int64) ([]BookingStatusHistory, error) {
@@ -704,7 +704,7 @@ JOIN bookings AS b
     ON b.id = bsh.booking_id
 WHERE bsh.booking_id = $1
   AND b.user_id = $2
-ORDER BY bsh.created_at ASC, bsh.id ASC
+ORDER BY bsh.id ASC
 `
 
 type ListBookingStatusHistoryForUserParams struct {

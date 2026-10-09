@@ -34,11 +34,12 @@ import (
 )
 
 const (
-	serverReadHeaderTimeout = 5 * time.Second
-	serverReadTimeout       = 15 * time.Second
-	serverWriteTimeout      = 30 * time.Second
-	serverIdleTimeout       = 60 * time.Second
-	serverMaxHeaderBytes    = 64 << 10
+	serverReadHeaderTimeout  = 5 * time.Second
+	serverReadTimeout        = 15 * time.Second
+	serverWriteTimeout       = 30 * time.Second
+	serverIdleTimeout        = 60 * time.Second
+	serverMaxHeaderBytes     = 64 << 10
+	databaseReadinessTimeout = 2 * time.Second
 )
 
 func main() {
@@ -48,9 +49,13 @@ func main() {
 	}
 	appCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	pool, err := pgxpool.New(appCtx, cfg.Database.URL)
+	poolConfig, err := newDatabasePoolConfig(cfg.Database)
 	if err != nil {
-		log.Fatalf("Unable to create connection pool : %v", err)
+		log.Fatalf("invalid database pool configuration: %v", err)
+	}
+	pool, err := pgxpool.NewWithConfig(appCtx, poolConfig)
+	if err != nil {
+		log.Fatalf("unable to create connection pool: %v", err)
 	}
 	defer pool.Close()
 	// Fail fast if the DB isn't actually reachable.
@@ -59,6 +64,7 @@ func main() {
 	}
 
 	queries := sqlc.New(pool)
+	healthHandler := handler.NewHealthHandler(pool, databaseReadinessTimeout, slog.Default())
 	tokenManager, err := auth.NewTokenManager(
 		cfg.JWT.Secret,
 		"ryoko",
@@ -188,145 +194,28 @@ func main() {
 	hotelImageHandler := handler.NewHotelImageHandler(hotelImageService)
 	inventoryService := inventory.NewService(pool, queries)
 	inventoryHandler := handler.NewInventoryHandler(inventoryService)
-	adminOnly := func(handler http.HandlerFunc) http.Handler {
-		return authMiddleware.Authenticate(
-			middleware.RequireRole(
-				auth.RoleAdmin,
-				handler,
-			),
-		)
-	}
-	mux := http.NewServeMux()
-	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		w.Write([]byte("OK"))
-	})
-
-	mux.Handle("POST /hotels", adminOnly(hotelHandler.Create))
-	mux.HandleFunc("GET /hotels/{id}", hotelHandler.GetByID)
-	mux.HandleFunc("GET /hotels", hotelHandler.ListHotelsByCity)
-	mux.Handle("PUT /hotels/{id}", adminOnly(hotelHandler.UpdateHotel))
-	mux.Handle("DELETE /hotels/{id}", adminOnly(hotelHandler.DeleteHotel))
-	mux.Handle("POST /hotels/{hotelID}/room-types", adminOnly(roomTypeHandler.CreateRoomType))
-	mux.HandleFunc("GET /room-types/{id}", roomTypeHandler.GetRoomTypeByID)
-	mux.Handle("PUT /room-types/{id}", adminOnly(roomTypeHandler.UpdateRoomType))
-	mux.Handle("DELETE /room-types/{id}", adminOnly(roomTypeHandler.DeleteRoomType))
-	mux.HandleFunc("GET /hotels/{hotelID}/room-types", roomTypeHandler.ListRoomTypesByHotel)
-	mux.Handle("POST /amenities", adminOnly(amenityHandler.CreateAmenity))
-	mux.Handle("PUT /amenities/{amenityID}", adminOnly(amenityHandler.UpdateAmenity))
-	mux.Handle("DELETE /amenities/{amenityID}", adminOnly(amenityHandler.DeleteAmenity))
-	mux.HandleFunc("GET /amenities", amenityHandler.ListAmenities)
-	mux.Handle("POST /hotels/{hotelID}/amenities", adminOnly(amenityHandler.AddAmenityToHotel))
-	mux.HandleFunc("GET /hotels/{hotelID}/amenities", amenityHandler.ListAmenitiesByHotel)
-	mux.Handle("DELETE /hotels/{hotelID}/amenities/{amenityID}", adminOnly(amenityHandler.RemoveAmenitiesFromHotel))
-	mux.Handle("GET /admin/bookings", adminOnly(adminBookingHandler.ListBookingsForAdmin))
-	mux.Handle("GET /me/bookings/{bookingID}/history", authMiddleware.Authenticate(http.HandlerFunc(bookingHandler.ListBookingStatusHistoryForUser)))
-	mux.Handle("GET /admin/bookings/{bookingID}/history", adminOnly(adminBookingHandler.ListBookingHistoryForAdmin))
-	mux.Handle("POST /admin/bookings/{bookingID}/cancel", adminOnly(adminBookingHandler.AdminCancellation))
-	mux.Handle(
-		"PUT /admin/room-types/{roomTypeID}/blocked-inventory",
-		adminOnly(inventoryHandler.BlockedInventory),
-	)
-
-	mux.Handle(
-		"GET /admin/room-types/{roomTypeID}/inventory",
-		adminOnly(inventoryHandler.ListRoomTypeInventory),
-	)
-	mux.Handle(
-		"GET /me",
-		authMiddleware.Authenticate(
-			http.HandlerFunc(userHandler.GetMe),
-		),
-	)
-
-	mux.Handle(
-		"PUT /me",
-		authMiddleware.Authenticate(
-			http.HandlerFunc(userHandler.UpdateMe),
-		),
-	)
-
-	mux.Handle(
-		"DELETE /me",
-		authMiddleware.Authenticate(
-			http.HandlerFunc(userHandler.DeleteMe),
-		),
-	)
-	mux.Handle("GET /me/bookings/{bookingID}", authMiddleware.Authenticate(
-		http.HandlerFunc(bookingHandler.GetBookingByUserID),
-	),
-	)
-	mux.Handle("GET /me/bookings", authMiddleware.Authenticate(
-		http.HandlerFunc(bookingHandler.ListBookingsByUser),
-	),
-	)
-	mux.Handle(
-		"POST /room-types/{roomTypeID}/bookings",
-		authMiddleware.Authenticate(
-			http.HandlerFunc(bookingHandler.CreateBooking),
-		),
-	)
-	mux.Handle("POST /me/bookings/{bookingID}/cancel",
-		authMiddleware.Authenticate(
-			http.HandlerFunc(bookingHandler.CancelBooking)))
-	mux.Handle("POST /me/bookings/{bookingID}/review",
-		authMiddleware.Authenticate(http.HandlerFunc(reviewHandler.CreateReview)))
-	mux.HandleFunc("GET /reviews/{reviewID}", reviewHandler.GetReviewByID)
-	mux.HandleFunc("GET /hotels/{hotelID}/reviews", reviewHandler.ListReviewByHotel)
-	mux.Handle("PUT /me/reviews/{reviewID}",
-		authMiddleware.Authenticate(http.HandlerFunc(reviewHandler.UpdateReviewByUser)))
-	mux.Handle("DELETE /me/reviews/{reviewID}",
-		authMiddleware.Authenticate(http.HandlerFunc(reviewHandler.DeleteReview)))
-	mux.Handle(
-		"POST /hotels/{hotelID}/images",
-		adminOnly(hotelImageHandler.CreateHotelImage),
-	)
-
-	mux.HandleFunc(
-		"GET /hotels/{hotelID}/images",
-		hotelImageHandler.ListHotelImages,
-	)
-
-	mux.Handle(
-		"PUT /hotels/{hotelID}/images/{imageID}/primary",
-		adminOnly(hotelImageHandler.SetPrimaryHotelImage),
-	)
-
-	mux.Handle(
-		"DELETE /hotels/{hotelID}/images/{imageID}",
-		adminOnly(hotelImageHandler.DeleteHotelImage),
-	)
-	mux.HandleFunc(
-		"GET /hotels/{hotelID}/available-room-types",
-		bookingHandler.ListAvailableRoomTypes,
-	)
-	mux.HandleFunc("GET /hotels/search", bookingHandler.SearchAvailableHotels)
-	mux.Handle("POST /auth/register", authRateLimiter.Limit("register", http.HandlerFunc(authHandler.RegisterUser)))
-	mux.Handle("POST /auth/login", authRateLimiter.Limit("login", http.HandlerFunc(authHandler.LoginUser)))
-	mux.Handle("POST /auth/refresh", corsMiddleware.RequireAllowedOrigin(
-		authRateLimiter.Limit("refresh", http.HandlerFunc(authHandler.RefreshToken)),
-	))
-	mux.Handle("POST /auth/logout", corsMiddleware.RequireAllowedOrigin(http.HandlerFunc(authHandler.Logout)))
-	mux.HandleFunc("GET /auth/google", oauthHandler.StartGoogle)
-	mux.HandleFunc("GET /auth/google/callback", oauthHandler.GoogleCallback)
-	mux.Handle("POST /auth/oauth/exchange", authRateLimiter.Limit("oauth-exchange", http.HandlerFunc(oauthHandler.ExchangeCode)))
-	mux.Handle("POST /auth/password-reset/request", authRateLimiter.Limit("password-reset-request", http.HandlerFunc(passwordResetHandler.Request)))
-	mux.Handle("POST /auth/password-reset/verify", authRateLimiter.Limit("password-reset-verify", http.HandlerFunc(passwordResetHandler.Verify)))
-	mux.Handle("POST /auth/password-reset/confirm", authRateLimiter.Limit("password-reset-confirm", http.HandlerFunc(passwordResetHandler.Confirm)))
-
 	addr := ":" + strconv.Itoa(cfg.API.Port)
 
-	server := newHTTPServer(
-		addr,
-		middleware.SecurityHeaders(
-			middleware.RequestID(
-				middleware.AccessLog(
-					slog.Default(),
-					middleware.RecoverPanic(slog.Default(), corsMiddleware.Allow(mux)),
-				),
-			),
-		),
-	)
+	apiHandler := newAPIHandler(apiDependencies{
+		healthHandler:        healthHandler,
+		hotelHandler:         hotelHandler,
+		roomTypeHandler:      roomTypeHandler,
+		amenityHandler:       amenityHandler,
+		userHandler:          userHandler,
+		authHandler:          authHandler,
+		oauthHandler:         oauthHandler,
+		passwordResetHandler: passwordResetHandler,
+		bookingHandler:       bookingHandler,
+		adminBookingHandler:  adminBookingHandler,
+		reviewHandler:        reviewHandler,
+		hotelImageHandler:    hotelImageHandler,
+		inventoryHandler:     inventoryHandler,
+		authMiddleware:       authMiddleware,
+		corsMiddleware:       corsMiddleware,
+		authRateLimiter:      authRateLimiter,
+		logger:               slog.Default(),
+	})
+	server := newHTTPServer(addr, apiHandler)
 
 	var workerWG sync.WaitGroup
 
@@ -399,4 +288,17 @@ func newHTTPServer(addr string, handler http.Handler) *http.Server {
 		IdleTimeout:       serverIdleTimeout,
 		MaxHeaderBytes:    serverMaxHeaderBytes,
 	}
+}
+
+func newDatabasePoolConfig(database config.DatabaseConfig) (*pgxpool.Config, error) {
+	poolConfig, err := pgxpool.ParseConfig(database.URL)
+	if err != nil {
+		return nil, err
+	}
+	poolConfig.MaxConns = database.MaxConns
+	poolConfig.MinConns = database.MinConns
+	poolConfig.MaxConnLifetime = database.MaxConnLifetime
+	poolConfig.MaxConnIdleTime = database.MaxConnIdleTime
+	poolConfig.HealthCheckPeriod = database.HealthCheckPeriod
+	return poolConfig, nil
 }

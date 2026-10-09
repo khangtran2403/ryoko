@@ -329,7 +329,7 @@ JOIN bookings AS b
     ON b.id = bsh.booking_id
 WHERE bsh.booking_id = sqlc.arg(booking_id)
   AND b.user_id = sqlc.arg(user_id)
-ORDER BY bsh.created_at ASC, bsh.id ASC;
+ORDER BY bsh.id ASC;
 -- name: ListBookingStatusHistoryForAdmin :many
 SELECT
     id,
@@ -341,7 +341,7 @@ SELECT
     created_at
 FROM booking_status_history
 WHERE booking_id = sqlc.arg(booking_id)
-ORDER BY created_at ASC, id ASC;
+ORDER BY id ASC;
 -- name: GetBookingForAdminCancellation :one
 SELECT
     id,

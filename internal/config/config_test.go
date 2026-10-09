@@ -34,6 +34,121 @@ func TestLoadTokenDurations(t *testing.T) {
 	}
 }
 
+func TestLoadDatabasePoolDefaults(t *testing.T) {
+	setRequiredSMTPEnv(t)
+	t.Setenv("JWT_SECRET", "test-secret-that-is-at-least-32-bytes-long")
+	t.Setenv("PASSWORD_RESET_PEPPER", "test-password-reset-pepper-at-least-32-bytes-long")
+	t.Chdir(t.TempDir())
+
+	for _, key := range []string{
+		"DB_MAX_CONNS",
+		"DB_MIN_CONNS",
+		"DB_MAX_CONN_LIFETIME_MINUTES",
+		"DB_MAX_CONN_IDLE_TIME_MINUTES",
+		"DB_HEALTH_CHECK_PERIOD_SECONDS",
+	} {
+		unsetDatabaseEnvForTest(t, key)
+	}
+
+	loaded, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if loaded.Database.MaxConns != 20 {
+		t.Errorf("MaxConns = %d, want 20", loaded.Database.MaxConns)
+	}
+	if loaded.Database.MinConns != 2 {
+		t.Errorf("MinConns = %d, want 2", loaded.Database.MinConns)
+	}
+	if loaded.Database.MaxConnLifetime != time.Hour {
+		t.Errorf("MaxConnLifetime = %v, want %v", loaded.Database.MaxConnLifetime, time.Hour)
+	}
+	if loaded.Database.MaxConnIdleTime != 30*time.Minute {
+		t.Errorf("MaxConnIdleTime = %v, want %v", loaded.Database.MaxConnIdleTime, 30*time.Minute)
+	}
+	if loaded.Database.HealthCheckPeriod != time.Minute {
+		t.Errorf("HealthCheckPeriod = %v, want %v", loaded.Database.HealthCheckPeriod, time.Minute)
+	}
+}
+
+func TestLoadDatabasePoolOverrides(t *testing.T) {
+	setRequiredSMTPEnv(t)
+	t.Setenv("JWT_SECRET", "test-secret-that-is-at-least-32-bytes-long")
+	t.Setenv("PASSWORD_RESET_PEPPER", "test-password-reset-pepper-at-least-32-bytes-long")
+	t.Setenv("DB_MAX_CONNS", "40")
+	t.Setenv("DB_MIN_CONNS", "5")
+	t.Setenv("DB_MAX_CONN_LIFETIME_MINUTES", "120")
+	t.Setenv("DB_MAX_CONN_IDLE_TIME_MINUTES", "15")
+	t.Setenv("DB_HEALTH_CHECK_PERIOD_SECONDS", "30")
+
+	loaded, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if loaded.Database.MaxConns != 40 || loaded.Database.MinConns != 5 {
+		t.Errorf("connections = min %d, max %d; want min 5, max 40", loaded.Database.MinConns, loaded.Database.MaxConns)
+	}
+	if loaded.Database.MaxConnLifetime != 2*time.Hour ||
+		loaded.Database.MaxConnIdleTime != 15*time.Minute ||
+		loaded.Database.HealthCheckPeriod != 30*time.Second {
+		t.Errorf("unexpected database durations: %+v", loaded.Database)
+	}
+}
+
+func TestLoadRejectsInvalidDatabasePoolConfig(t *testing.T) {
+	tests := []struct {
+		name  string
+		key   string
+		value string
+	}{
+		{name: "non-numeric max", key: "DB_MAX_CONNS", value: "many"},
+		{name: "zero max", key: "DB_MAX_CONNS", value: "0"},
+		{name: "excessive max", key: "DB_MAX_CONNS", value: "1001"},
+		{name: "negative min", key: "DB_MIN_CONNS", value: "-1"},
+		{name: "min exceeds max", key: "DB_MIN_CONNS", value: "21"},
+		{name: "invalid lifetime", key: "DB_MAX_CONN_LIFETIME_MINUTES", value: "invalid"},
+		{name: "zero idle time", key: "DB_MAX_CONN_IDLE_TIME_MINUTES", value: "0"},
+		{name: "negative health period", key: "DB_HEALTH_CHECK_PERIOD_SECONDS", value: "-1"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			setRequiredSMTPEnv(t)
+			t.Setenv("JWT_SECRET", "test-secret-that-is-at-least-32-bytes-long")
+			t.Setenv("PASSWORD_RESET_PEPPER", "test-password-reset-pepper-at-least-32-bytes-long")
+			t.Setenv("DB_MAX_CONNS", "20")
+			t.Setenv("DB_MIN_CONNS", "2")
+			t.Setenv("DB_MAX_CONN_LIFETIME_MINUTES", "60")
+			t.Setenv("DB_MAX_CONN_IDLE_TIME_MINUTES", "30")
+			t.Setenv("DB_HEALTH_CHECK_PERIOD_SECONDS", "60")
+			t.Setenv(tt.key, tt.value)
+
+			_, err := Load()
+			if err == nil {
+				t.Fatal("Load() returned nil error")
+			}
+			if !strings.Contains(err.Error(), tt.key) {
+				t.Errorf("error = %q, want key %q", err, tt.key)
+			}
+		})
+	}
+}
+
+func unsetDatabaseEnvForTest(t *testing.T, key string) {
+	t.Helper()
+	originalValue, existed := os.LookupEnv(key)
+	if err := os.Unsetenv(key); err != nil {
+		t.Fatalf("unset %s: %v", key, err)
+	}
+	t.Cleanup(func() {
+		if existed {
+			_ = os.Setenv(key, originalValue)
+			return
+		}
+		_ = os.Unsetenv(key)
+	})
+}
+
 func TestLoadRejectsInvalidTokenDurations(t *testing.T) {
 	tests := []struct {
 		name  string

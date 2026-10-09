@@ -12,10 +12,8 @@ import (
 )
 
 type Config struct {
-	Database struct {
-		URL string
-	}
-	API struct {
+	Database DatabaseConfig
+	API      struct {
 		Port int
 	}
 	CORS struct {
@@ -61,6 +59,15 @@ type Config struct {
 	Environment   string
 }
 
+type DatabaseConfig struct {
+	URL               string
+	MaxConns          int32
+	MinConns          int32
+	MaxConnLifetime   time.Duration
+	MaxConnIdleTime   time.Duration
+	HealthCheckPeriod time.Duration
+}
+
 var cfg *Config
 
 func Load() (*Config, error) {
@@ -73,6 +80,26 @@ func Load() (*Config, error) {
 	port, err := getEnvInt("API_PORT", 8080)
 	if err != nil {
 		return nil, fmt.Errorf("invalid API_PORT: %w", err)
+	}
+	maxConns, err := getEnvInt("DB_MAX_CONNS", 20)
+	if err != nil || maxConns < 1 || maxConns > 1000 {
+		return nil, fmt.Errorf("invalid DB_MAX_CONNS: must be an integer from 1 to 1000")
+	}
+	minConns, err := getEnvInt("DB_MIN_CONNS", 2)
+	if err != nil || minConns < 0 || minConns > maxConns {
+		return nil, fmt.Errorf("invalid DB_MIN_CONNS: must be an integer from 0 to DB_MAX_CONNS")
+	}
+	maxConnLifetime, err := getEnvDuration("DB_MAX_CONN_LIFETIME_MINUTES", 60, "m")
+	if err != nil {
+		return nil, fmt.Errorf("invalid DB_MAX_CONN_LIFETIME_MINUTES: %w", err)
+	}
+	maxConnIdleTime, err := getEnvDuration("DB_MAX_CONN_IDLE_TIME_MINUTES", 30, "m")
+	if err != nil {
+		return nil, fmt.Errorf("invalid DB_MAX_CONN_IDLE_TIME_MINUTES: %w", err)
+	}
+	healthCheckPeriod, err := getEnvDuration("DB_HEALTH_CHECK_PERIOD_SECONDS", 60, "s")
+	if err != nil {
+		return nil, fmt.Errorf("invalid DB_HEALTH_CHECK_PERIOD_SECONDS: %w", err)
 	}
 	jwtSecret := getEnv("JWT_SECRET", "")
 	if len([]byte(jwtSecret)) < 32 {
@@ -199,10 +226,13 @@ func Load() (*Config, error) {
 	frontendOrigin = strings.ToLower(parsedFrontendOrigin.Scheme) + "://" + strings.ToLower(parsedFrontendOrigin.Host)
 
 	cfg = &Config{
-		Database: struct {
-			URL string
-		}{
-			URL: getEnv("DATABASE_URL", ""),
+		Database: DatabaseConfig{
+			URL:               getEnv("DATABASE_URL", ""),
+			MaxConns:          int32(maxConns),
+			MinConns:          int32(minConns),
+			MaxConnLifetime:   maxConnLifetime,
+			MaxConnIdleTime:   maxConnIdleTime,
+			HealthCheckPeriod: healthCheckPeriod,
 		},
 		API: struct {
 			Port int
