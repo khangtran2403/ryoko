@@ -1,31 +1,25 @@
-# Go
-*.out
-*.a
-*.so
-__pycache__/
-*.py[cod]
-*$py.class
-*.so
-.DS_Store
-
-# IDE
-.vscode/
-.idea/
-*.swp
-
-# Environment
+# Local environment and secrets
 .env
-.env.local
+.env.*
+!.env.example
 
-# Docker
-docker-compose.override.yml
+# Go build and test output
+/bin/
+/dist/
+*.exe
+*.test
+*.out
+coverage.txt
+coverage.html
+.gocache/
 
-# Node
-node_modules/
-web/dist/
-web/build/
-EOF
+# Local tooling and editors
+.idea/
+.vscode/
+*.swp
+*.swo
 
-#githooks
-.pre-commit-config.yaml
-.secrets.baseline
+# Operating-system files
+.DS_Store
+Thumbs.db
+

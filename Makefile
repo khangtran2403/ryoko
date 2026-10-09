@@ -1,4 +1,14 @@
-TEST_DB_URL=postgres://test:test@localhost:5433/testdb?sslmode=disable
+TEST_DATABASE_URL ?= postgres://test:test@localhost:5433/testdb?sslmode=disable
+export TEST_DATABASE_URL
+
+dev-up:
+	docker compose up --build -d
+
+dev-down:
+	docker compose down
+
+dev-logs:
+	docker compose logs -f api
 
 test-db-up:
 	docker compose -f docker_compose.test.yml up -d
