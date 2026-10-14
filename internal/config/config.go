@@ -55,6 +55,7 @@ type Config struct {
 		RequestCooldown time.Duration
 		CleanupInterval time.Duration
 	}
+	Payment       PaymentConfig
 	EncryptionKey string
 	Environment   string
 }
@@ -66,6 +67,11 @@ type DatabaseConfig struct {
 	MaxConnLifetime   time.Duration
 	MaxConnIdleTime   time.Duration
 	HealthCheckPeriod time.Duration
+}
+
+type PaymentConfig struct {
+	Provider   string
+	PendingTTL time.Duration
 }
 
 var cfg *Config
@@ -210,6 +216,14 @@ func Load() (*Config, error) {
 	if err != nil {
 		return nil, fmt.Errorf("invalid OAUTH_CLEANUP_INTERVAL_MINUTES: %w", err)
 	}
+	paymentProvider := strings.TrimSpace(getEnv("PAYMENT_PROVIDER", ""))
+	if paymentProvider == "" {
+		return nil, fmt.Errorf("PAYMENT_PROVIDER is required")
+	}
+	paymentPendingTTL, err := getEnvDuration("PAYMENT_PENDING_TTL_MINUTES", 15, "m")
+	if err != nil {
+		return nil, fmt.Errorf("invalid PAYMENT_PENDING_TTL_MINUTES: %w", err)
+	}
 	frontendOrigin := strings.TrimSpace(getEnv("FRONTEND_ORIGIN", ""))
 	parsedFrontendOrigin, err := url.Parse(frontendOrigin)
 	if err != nil || parsedFrontendOrigin.Scheme == "" || parsedFrontendOrigin.Host == "" {
@@ -310,6 +324,10 @@ func Load() (*Config, error) {
 			SuccessRedirectURL: oauthSuccessRedirectURL,
 			LoginCodeTTL:       oauthLoginCodeTTL,
 			CleanupInterval:    oauthCleanupInterval,
+		},
+		Payment: PaymentConfig{
+			Provider:   paymentProvider,
+			PendingTTL: paymentPendingTTL,
 		},
 		Environment: getEnv("ENV", "development"),
 	}

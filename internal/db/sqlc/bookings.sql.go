@@ -60,7 +60,9 @@ RETURNING
     total_price,
     status,
     created_at,
-    updated_at
+    updated_at,
+    currency,
+    payment_expires_at
 `
 
 type CancelBookingParams struct {
@@ -84,6 +86,8 @@ func (q *Queries) CancelBooking(ctx context.Context, arg CancelBookingParams) (B
 		&i.Status,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.Currency,
+		&i.PaymentExpiresAt,
 	)
 	return i, err
 }
@@ -107,7 +111,9 @@ RETURNING
     total_price,
     status,
     created_at,
-    updated_at
+    updated_at,
+    currency,
+    payment_expires_at
 `
 
 func (q *Queries) CancelBookingForAdmin(ctx context.Context, bookingID int64) (Booking, error) {
@@ -126,6 +132,8 @@ func (q *Queries) CancelBookingForAdmin(ctx context.Context, bookingID int64) (B
 		&i.Status,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.Currency,
+		&i.PaymentExpiresAt,
 	)
 	return i, err
 }
@@ -201,6 +209,53 @@ func (q *Queries) CompletePastBookings(ctx context.Context, today pgtype.Date) (
 	return completed_count, err
 }
 
+const confirmPendingBooking = `-- name: ConfirmPendingBooking :one
+UPDATE bookings
+SET
+    status = 'confirmed',
+    updated_at = now()
+WHERE id = $1
+  AND status = 'pending_payment'
+  AND payment_expires_at > now()
+RETURNING
+    id,
+    user_id,
+    room_type_id,
+    check_in,
+    check_out,
+    rooms_count,
+    guest_count,
+    price_per_night,
+    total_price,
+    status,
+    created_at,
+    updated_at,
+    currency,
+    payment_expires_at
+`
+
+func (q *Queries) ConfirmPendingBooking(ctx context.Context, bookingID int64) (Booking, error) {
+	row := q.db.QueryRow(ctx, confirmPendingBooking, bookingID)
+	var i Booking
+	err := row.Scan(
+		&i.ID,
+		&i.UserID,
+		&i.RoomTypeID,
+		&i.CheckIn,
+		&i.CheckOut,
+		&i.RoomsCount,
+		&i.GuestCount,
+		&i.PricePerNight,
+		&i.TotalPrice,
+		&i.Status,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.Currency,
+		&i.PaymentExpiresAt,
+	)
+	return i, err
+}
+
 const createBooking = `-- name: CreateBooking :one
 INSERT INTO bookings (
     user_id,
@@ -236,7 +291,9 @@ RETURNING
     total_price,
     status,
     created_at,
-    updated_at
+    updated_at,
+    currency,
+    payment_expires_at
 `
 
 type CreateBookingParams struct {
@@ -273,6 +330,8 @@ func (q *Queries) CreateBooking(ctx context.Context, arg CreateBookingParams) (B
 		&i.Status,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.Currency,
+		&i.PaymentExpiresAt,
 	)
 	return i, err
 }
@@ -327,6 +386,96 @@ func (q *Queries) CreateBookingStatusHistory(ctx context.Context, arg CreateBook
 		&i.ChangedByUserID,
 		&i.Reason,
 		&i.CreatedAt,
+	)
+	return i, err
+}
+
+const createPendingBooking = `-- name: CreatePendingBooking :one
+INSERT INTO bookings (
+    user_id,
+    room_type_id,
+    check_in,
+    check_out,
+    rooms_count,
+    guest_count,
+    price_per_night,
+    total_price,
+    currency,
+    status,
+    payment_expires_at
+)
+VALUES (
+    $1,
+    $2,
+    $3,
+    $4,
+    $5,
+    $6,
+    $7,
+    $7::numeric
+        * ($4::date - $3::date)
+        * $5::int,
+    $8,
+    'pending_payment',
+    now() + $9::bigint * interval '1 second'
+)
+RETURNING
+    id,
+    user_id,
+    room_type_id,
+    check_in,
+    check_out,
+    rooms_count,
+    guest_count,
+    price_per_night,
+    total_price,
+    status,
+    created_at,
+    updated_at,
+    currency,
+    payment_expires_at
+`
+
+type CreatePendingBookingParams struct {
+	UserID                   int64          `json:"user_id"`
+	RoomTypeID               int64          `json:"room_type_id"`
+	CheckIn                  pgtype.Date    `json:"check_in"`
+	CheckOut                 pgtype.Date    `json:"check_out"`
+	RoomsCount               int32          `json:"rooms_count"`
+	GuestCount               int32          `json:"guest_count"`
+	PricePerNight            pgtype.Numeric `json:"price_per_night"`
+	Currency                 string         `json:"currency"`
+	PaymentPendingTtlSeconds int64          `json:"payment_pending_ttl_seconds"`
+}
+
+func (q *Queries) CreatePendingBooking(ctx context.Context, arg CreatePendingBookingParams) (Booking, error) {
+	row := q.db.QueryRow(ctx, createPendingBooking,
+		arg.UserID,
+		arg.RoomTypeID,
+		arg.CheckIn,
+		arg.CheckOut,
+		arg.RoomsCount,
+		arg.GuestCount,
+		arg.PricePerNight,
+		arg.Currency,
+		arg.PaymentPendingTtlSeconds,
+	)
+	var i Booking
+	err := row.Scan(
+		&i.ID,
+		&i.UserID,
+		&i.RoomTypeID,
+		&i.CheckIn,
+		&i.CheckOut,
+		&i.RoomsCount,
+		&i.GuestCount,
+		&i.PricePerNight,
+		&i.TotalPrice,
+		&i.Status,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.Currency,
+		&i.PaymentExpiresAt,
 	)
 	return i, err
 }
@@ -388,6 +537,52 @@ func (q *Queries) EnsureAvailabilityRows(ctx context.Context, arg EnsureAvailabi
 	return err
 }
 
+const expirePendingBooking = `-- name: ExpirePendingBooking :one
+UPDATE bookings
+SET
+    status = 'cancelled',
+    updated_at = now()
+WHERE id = $1
+  AND status = 'pending_payment'
+RETURNING
+    id,
+    user_id,
+    room_type_id,
+    check_in,
+    check_out,
+    rooms_count,
+    guest_count,
+    price_per_night,
+    total_price,
+    status,
+    created_at,
+    updated_at,
+    currency,
+    payment_expires_at
+`
+
+func (q *Queries) ExpirePendingBooking(ctx context.Context, bookingID int64) (Booking, error) {
+	row := q.db.QueryRow(ctx, expirePendingBooking, bookingID)
+	var i Booking
+	err := row.Scan(
+		&i.ID,
+		&i.UserID,
+		&i.RoomTypeID,
+		&i.CheckIn,
+		&i.CheckOut,
+		&i.RoomsCount,
+		&i.GuestCount,
+		&i.PricePerNight,
+		&i.TotalPrice,
+		&i.Status,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.Currency,
+		&i.PaymentExpiresAt,
+	)
+	return i, err
+}
+
 const getBookingByIDForAdmin = `-- name: GetBookingByIDForAdmin :one
 SELECT
     id,
@@ -401,7 +596,9 @@ SELECT
     total_price,
     status,
     created_at,
-    updated_at
+    updated_at,
+    currency,
+    payment_expires_at
 FROM bookings
 WHERE id = $1
 `
@@ -422,6 +619,8 @@ func (q *Queries) GetBookingByIDForAdmin(ctx context.Context, bookingID int64) (
 		&i.Status,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.Currency,
+		&i.PaymentExpiresAt,
 	)
 	return i, err
 }
@@ -439,7 +638,9 @@ SELECT
     total_price,
     status,
     created_at,
-    updated_at
+    updated_at,
+    currency,
+    payment_expires_at
 FROM bookings
 WHERE id = $1
 AND user_id = $2
@@ -466,6 +667,8 @@ func (q *Queries) GetBookingByIDForUser(ctx context.Context, arg GetBookingByIDF
 		&i.Status,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.Currency,
+		&i.PaymentExpiresAt,
 	)
 	return i, err
 }
@@ -483,7 +686,9 @@ SELECT
     total_price,
     status,
     created_at,
-    updated_at
+    updated_at,
+    currency,
+    payment_expires_at
 FROM bookings
 WHERE id = $1
 FOR UPDATE
@@ -505,6 +710,8 @@ func (q *Queries) GetBookingForAdminCancellation(ctx context.Context, bookingID 
 		&i.Status,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.Currency,
+		&i.PaymentExpiresAt,
 	)
 	return i, err
 }
@@ -522,7 +729,9 @@ SELECT
     total_price,
     status,
     created_at,
-    updated_at
+    updated_at,
+    currency,
+    payment_expires_at
 FROM bookings
 WHERE id = $1
 AND user_id = $2
@@ -550,6 +759,8 @@ func (q *Queries) GetBookingForCancellation(ctx context.Context, arg GetBookingF
 		&i.Status,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.Currency,
+		&i.PaymentExpiresAt,
 	)
 	return i, err
 }
@@ -585,6 +796,7 @@ SELECT
     rt.id,
     rt.price_per_night,
     rt.capacity,
+    rt.currency,
     rt.total_rooms
 FROM room_types AS rt
 JOIN hotels AS h
@@ -599,6 +811,7 @@ type GetRoomTypeForBookingRow struct {
 	ID            int64          `json:"id"`
 	PricePerNight pgtype.Numeric `json:"price_per_night"`
 	Capacity      int32          `json:"capacity"`
+	Currency      string         `json:"currency"`
 	TotalRooms    int32          `json:"total_rooms"`
 }
 
@@ -609,6 +822,7 @@ func (q *Queries) GetRoomTypeForBooking(ctx context.Context, roomTypeID int64) (
 		&i.ID,
 		&i.PricePerNight,
 		&i.Capacity,
+		&i.Currency,
 		&i.TotalRooms,
 	)
 	return i, err
@@ -753,7 +967,9 @@ SELECT
     total_price,
     status,
     created_at,
-    updated_at
+    updated_at,
+    currency,
+    payment_expires_at
 FROM bookings
 WHERE user_id = $1
 ORDER BY created_at DESC, id DESC
@@ -789,6 +1005,8 @@ func (q *Queries) ListBookingsByUser(ctx context.Context, arg ListBookingsByUser
 			&i.Status,
 			&i.CreatedAt,
 			&i.UpdatedAt,
+			&i.Currency,
+			&i.PaymentExpiresAt,
 		); err != nil {
 			return nil, err
 		}
@@ -913,6 +1131,65 @@ func (q *Queries) ListBookingsForAdmin(ctx context.Context, arg ListBookingsForA
 			&i.Status,
 			&i.CreatedAt,
 			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listExpiredPendingBookingsForUpdate = `-- name: ListExpiredPendingBookingsForUpdate :many
+SELECT
+    id,
+    user_id,
+    room_type_id,
+    check_in,
+    check_out,
+    rooms_count,
+    guest_count,
+    price_per_night,
+    total_price,
+    status,
+    created_at,
+    updated_at,
+    currency,
+    payment_expires_at
+FROM bookings
+WHERE status = 'pending_payment'
+  AND payment_expires_at <= now()
+ORDER BY payment_expires_at, id
+LIMIT $1::int
+FOR UPDATE SKIP LOCKED
+`
+
+func (q *Queries) ListExpiredPendingBookingsForUpdate(ctx context.Context, batchSize int32) ([]Booking, error) {
+	rows, err := q.db.Query(ctx, listExpiredPendingBookingsForUpdate, batchSize)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []Booking
+	for rows.Next() {
+		var i Booking
+		if err := rows.Scan(
+			&i.ID,
+			&i.UserID,
+			&i.RoomTypeID,
+			&i.CheckIn,
+			&i.CheckOut,
+			&i.RoomsCount,
+			&i.GuestCount,
+			&i.PricePerNight,
+			&i.TotalPrice,
+			&i.Status,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+			&i.Currency,
+			&i.PaymentExpiresAt,
 		); err != nil {
 			return nil, err
 		}

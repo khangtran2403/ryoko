@@ -3,6 +3,7 @@ SELECT
     rt.id,
     rt.price_per_night,
     rt.capacity,
+    rt.currency,
     rt.total_rooms
 FROM room_types AS rt
 JOIN hotels AS h
@@ -11,7 +12,120 @@ WHERE rt.id = sqlc.arg(room_type_id)
   AND rt.is_active = true
   AND h.is_active = true
 FOR SHARE OF h, rt;
+-- name: CreatePendingBooking :one
+INSERT INTO bookings (
+    user_id,
+    room_type_id,
+    check_in,
+    check_out,
+    rooms_count,
+    guest_count,
+    price_per_night,
+    total_price,
+    currency,
+    status,
+    payment_expires_at
+)
+VALUES (
+    sqlc.arg(user_id),
+    sqlc.arg(room_type_id),
+    sqlc.arg(check_in),
+    sqlc.arg(check_out),
+    sqlc.arg(rooms_count),
+    sqlc.arg(guest_count),
+    sqlc.arg(price_per_night),
+    sqlc.arg(price_per_night)::numeric
+        * (sqlc.arg(check_out)::date - sqlc.arg(check_in)::date)
+        * sqlc.arg(rooms_count)::int,
+    sqlc.arg(currency),
+    'pending_payment',
+    now() + sqlc.arg(payment_pending_ttl_seconds)::bigint * interval '1 second'
+)
+RETURNING
+    id,
+    user_id,
+    room_type_id,
+    check_in,
+    check_out,
+    rooms_count,
+    guest_count,
+    price_per_night,
+    total_price,
+    status,
+    created_at,
+    updated_at,
+    currency,
+    payment_expires_at;
 
+-- name: ConfirmPendingBooking :one
+UPDATE bookings
+SET
+    status = 'confirmed',
+    updated_at = now()
+WHERE id = sqlc.arg(booking_id)
+  AND status = 'pending_payment'
+  AND payment_expires_at > now()
+RETURNING
+    id,
+    user_id,
+    room_type_id,
+    check_in,
+    check_out,
+    rooms_count,
+    guest_count,
+    price_per_night,
+    total_price,
+    status,
+    created_at,
+    updated_at,
+    currency,
+    payment_expires_at;
+
+-- name: ExpirePendingBooking :one
+UPDATE bookings
+SET
+    status = 'cancelled',
+    updated_at = now()
+WHERE id = sqlc.arg(booking_id)
+  AND status = 'pending_payment'
+RETURNING
+    id,
+    user_id,
+    room_type_id,
+    check_in,
+    check_out,
+    rooms_count,
+    guest_count,
+    price_per_night,
+    total_price,
+    status,
+    created_at,
+    updated_at,
+    currency,
+    payment_expires_at;
+
+-- name: ListExpiredPendingBookingsForUpdate :many
+SELECT
+    id,
+    user_id,
+    room_type_id,
+    check_in,
+    check_out,
+    rooms_count,
+    guest_count,
+    price_per_night,
+    total_price,
+    status,
+    created_at,
+    updated_at,
+    currency,
+    payment_expires_at
+FROM bookings
+WHERE status = 'pending_payment'
+  AND payment_expires_at <= now()
+ORDER BY payment_expires_at, id
+LIMIT sqlc.arg(batch_size)::int
+FOR UPDATE SKIP LOCKED;
 -- name: EnsureAvailabilityRows :exec
 INSERT INTO room_type_availability (
     room_type_id,
@@ -87,7 +201,9 @@ RETURNING
     total_price,
     status,
     created_at,
-    updated_at;
+    updated_at,
+    currency,
+    payment_expires_at;
 -- name: ListBookingsByUser :many
 SELECT
     id,
@@ -101,7 +217,9 @@ SELECT
     total_price,
     status,
     created_at,
-    updated_at
+    updated_at,
+    currency,
+    payment_expires_at
 FROM bookings
 WHERE user_id = sqlc.arg(user_id)
 ORDER BY created_at DESC, id DESC
@@ -120,7 +238,9 @@ SELECT
     total_price,
     status,
     created_at,
-    updated_at
+    updated_at,
+    currency,
+    payment_expires_at
 FROM bookings
 WHERE id = sqlc.arg(booking_id)
 AND user_id = sqlc.arg(user_id);
@@ -137,7 +257,9 @@ SELECT
     total_price,
     status,
     created_at,
-    updated_at
+    updated_at,
+    currency,
+    payment_expires_at
 FROM bookings
 WHERE id = sqlc.arg(booking_id);
 -- name: GetBookingForCancellation :one
@@ -153,7 +275,9 @@ SELECT
     total_price,
     status,
     created_at,
-    updated_at
+    updated_at,
+    currency,
+    payment_expires_at
 FROM bookings
 WHERE id = sqlc.arg(booking_id)
 AND user_id = sqlc.arg(user_id)
@@ -185,7 +309,9 @@ RETURNING
     total_price,
     status,
     created_at,
-    updated_at;
+    updated_at,
+    currency,
+    payment_expires_at;
 -- name: CompletePastBookings :one
 WITH completed_bookings AS (
     UPDATE bookings
@@ -355,7 +481,9 @@ SELECT
     total_price,
     status,
     created_at,
-    updated_at
+    updated_at,
+    currency,
+    payment_expires_at
 FROM bookings
 WHERE id = sqlc.arg(booking_id)
 FOR UPDATE;
@@ -378,4 +506,6 @@ RETURNING
     total_price,
     status,
     created_at,
-    updated_at;
+    updated_at,
+    currency,
+    payment_expires_at;

@@ -34,6 +34,54 @@ func TestLoadTokenDurations(t *testing.T) {
 	}
 }
 
+func TestLoadPaymentConfig(t *testing.T) {
+	setRequiredSMTPEnv(t)
+	t.Setenv("JWT_SECRET", "test-secret-that-is-at-least-32-bytes-long")
+	t.Setenv("PASSWORD_RESET_PEPPER", "test-password-reset-pepper-at-least-32-bytes-long")
+	t.Setenv("PAYMENT_PROVIDER", "  stripe  ")
+	t.Setenv("PAYMENT_PENDING_TTL_MINUTES", "20")
+
+	loaded, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if loaded.Payment.Provider != "stripe" {
+		t.Errorf("Payment.Provider = %q, want %q", loaded.Payment.Provider, "stripe")
+	}
+	if loaded.Payment.PendingTTL != 20*time.Minute {
+		t.Errorf("Payment.PendingTTL = %v, want %v", loaded.Payment.PendingTTL, 20*time.Minute)
+	}
+}
+
+func TestLoadRejectsInvalidPaymentConfig(t *testing.T) {
+	tests := []struct {
+		name  string
+		key   string
+		value string
+	}{
+		{name: "empty provider", key: "PAYMENT_PROVIDER", value: "   "},
+		{name: "invalid pending TTL", key: "PAYMENT_PENDING_TTL_MINUTES", value: "invalid"},
+		{name: "zero pending TTL", key: "PAYMENT_PENDING_TTL_MINUTES", value: "0"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			setRequiredSMTPEnv(t)
+			t.Setenv("JWT_SECRET", "test-secret-that-is-at-least-32-bytes-long")
+			t.Setenv("PASSWORD_RESET_PEPPER", "test-password-reset-pepper-at-least-32-bytes-long")
+			t.Setenv(tt.key, tt.value)
+
+			_, err := Load()
+			if err == nil {
+				t.Fatal("Load() returned nil error")
+			}
+			if !strings.Contains(err.Error(), tt.key) {
+				t.Errorf("error = %q, want key %q", err, tt.key)
+			}
+		})
+	}
+}
+
 func TestLoadDatabasePoolDefaults(t *testing.T) {
 	setRequiredSMTPEnv(t)
 	t.Setenv("JWT_SECRET", "test-secret-that-is-at-least-32-bytes-long")
@@ -504,4 +552,6 @@ func setRequiredSMTPEnv(t *testing.T) {
 	t.Setenv("OAUTH_CLEANUP_INTERVAL_MINUTES", "30")
 	t.Setenv("FRONTEND_ORIGIN", "http://localhost:3000")
 	t.Setenv("REFRESH_COOKIE_SECURE", "false")
+	t.Setenv("PAYMENT_PROVIDER", "fake")
+	t.Setenv("PAYMENT_PENDING_TTL_MINUTES", "15")
 }

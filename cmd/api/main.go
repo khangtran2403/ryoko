@@ -169,7 +169,10 @@ func main() {
 	if err != nil {
 		log.Fatalf("create authentication rate limiter: %v", err)
 	}
-	bookingService := booking.NewService(pool, queries)
+	bookingService := booking.NewService(pool, queries, booking.PaymentSettings{
+		Provider:   cfg.Payment.Provider,
+		PendingTTL: cfg.Payment.PendingTTL,
+	})
 	newAdminBookingService := admin_booking.NewService(queries)
 	completionWorker := booking.NewCompletionWorker(
 		bookingService,

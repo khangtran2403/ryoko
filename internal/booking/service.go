@@ -115,16 +115,29 @@ type cancellationInput struct {
 	ownerID   *int64
 	reason    string
 }
+type PaymentSettings struct {
+	Provider   string
+	PendingTTL time.Duration
+}
 type Service struct {
 	pool    *pgxpool.Pool
 	queries *sqlc.Queries
+	payment PaymentSettings
 	now     func() time.Time
 }
 
-func NewService(pool *pgxpool.Pool, queries *sqlc.Queries) *Service {
+func NewService(pool *pgxpool.Pool, queries *sqlc.Queries, payment PaymentSettings) *Service {
+	payment.Provider = strings.TrimSpace(payment.Provider)
+	if payment.Provider == "" {
+		panic("payment provider must not be empty")
+	}
+	if payment.PendingTTL < time.Second {
+		panic("payment pending TTL must be at least one second")
+	}
 	return &Service{
 		pool:    pool,
 		queries: queries,
+		payment: payment,
 		now:     time.Now,
 	}
 }
@@ -207,7 +220,7 @@ func (s *Service) CreateBooking(ctx context.Context, input CreateInput) (sqlc.Bo
 
 	case claim == 1:
 
-		roomType, err := qtx.GetRoomTypeForBooking(ctx, input.RoomTypeID)
+		roomType, err = qtx.GetRoomTypeForBooking(ctx, input.RoomTypeID)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return sqlc.Booking{}, ErrRoomTypeNotFound
 		}
@@ -274,17 +287,36 @@ func (s *Service) CreateBooking(ctx context.Context, input CreateInput) (sqlc.Bo
 			return sqlc.Booking{}, ErrUnavailable
 		}
 	}
-	createBooking, err := qtx.CreateBooking(ctx, sqlc.CreateBookingParams{
-		UserID:        input.UserID,
-		RoomTypeID:    input.RoomTypeID,
-		CheckIn:       checkIn,
-		CheckOut:      checkOut,
-		RoomsCount:    input.RoomsCount,
-		GuestCount:    input.GuestCount,
-		PricePerNight: roomType.PricePerNight,
+	createBooking, err := qtx.CreatePendingBooking(ctx, sqlc.CreatePendingBookingParams{
+		UserID:                   input.UserID,
+		RoomTypeID:               input.RoomTypeID,
+		CheckIn:                  checkIn,
+		CheckOut:                 checkOut,
+		RoomsCount:               input.RoomsCount,
+		GuestCount:               input.GuestCount,
+		PricePerNight:            roomType.PricePerNight,
+		Currency:                 roomType.Currency,
+		PaymentPendingTtlSeconds: int64(s.payment.PendingTTL / time.Second),
 	})
 	if err != nil {
 		return sqlc.Booking{}, fmt.Errorf("create booking: %w", err)
+	}
+	providerKey := fmt.Sprintf(
+		"booking:%d:payment:create",
+		createBooking.ID,
+	)
+
+	_, err = qtx.CreatePaymentForBooking(ctx, sqlc.CreatePaymentForBookingParams{
+		Provider:               s.payment.Provider,
+		ProviderIdempotencyKey: providerKey,
+		BookingID:              createBooking.ID,
+		UserID:                 input.UserID,
+	})
+	if errors.Is(err, pgx.ErrNoRows) {
+		return sqlc.Booking{}, errors.New("payment invariant violated: pending booking is not payable")
+	}
+	if err != nil {
+		return sqlc.Booking{}, fmt.Errorf("create payment: %w", err)
 	}
 	bookingID := pgtype.Int8{Int64: createBooking.ID, Valid: true}
 	if bookingID.Valid {
@@ -304,9 +336,9 @@ func (s *Service) CreateBooking(ctx context.Context, input CreateInput) (sqlc.Bo
 	_, err = qtx.CreateBookingStatusHistory(ctx, sqlc.CreateBookingStatusHistoryParams{
 		BookingID:       createBooking.ID,
 		FromStatus:      pgtype.Text{},
-		ToStatus:        "confirmed",
+		ToStatus:        "pending_payment",
 		ChangedByUserID: pgtype.Int8{Int64: input.UserID, Valid: true},
-		Reason:          pgtype.Text{String: "Booking created", Valid: true},
+		Reason:          pgtype.Text{String: "Booking created awaiting payment", Valid: true},
 	})
 	if errors.Is(err, pgx.ErrNoRows) {
 		return sqlc.Booking{}, ErrBookingStatusHistoryNotFound
@@ -322,7 +354,6 @@ func (s *Service) CreateBooking(ctx context.Context, input CreateInput) (sqlc.Bo
 	}
 
 	return createBooking, nil
-
 }
 func (s *Service) GetBookingByUserID(ctx context.Context, bookingID int64, userID int64) (sqlc.Booking, error) {
 	if bookingID <= 0 {

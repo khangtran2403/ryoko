@@ -55,9 +55,10 @@ func TestCreateBookingIntegration(t *testing.T) {
 	if created.RoomTypeID != roomTypeID {
 		t.Errorf("created RoomTypeID = %d, want %d", created.RoomTypeID, roomTypeID)
 	}
-	if created.Status != "confirmed" {
-		t.Errorf("created Status = %q, want confirmed", created.Status)
+	if created.Status != "pending_payment" {
+		t.Errorf("created Status = %q, want pending_payment", created.Status)
 	}
+	assertPendingPaymentForBooking(t, pool, created.ID, 300, "VND", "fake", 15*time.Minute)
 
 	var totalPrice string
 	err = pool.QueryRow(
@@ -234,7 +235,7 @@ func TestCreateBookingRejectsReusedKeyWithDifferentPayload(t *testing.T) {
 	}
 
 	assertBookingCounts(t, pool, 1, 3)
-	assertBookingStatus(t, pool, created.ID, "confirmed")
+	assertBookingStatus(t, pool, created.ID, "pending_payment")
 	assertAvailabilityRange(t, pool, roomTypeID, 3, 1, 1)
 }
 
@@ -284,6 +285,7 @@ func TestCancelBookingRestoresAvailabilityExactlyOnce(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateBooking() error = %v", err)
 	}
+	confirmBookingForTest(t, pool, created.ID)
 	assertAvailabilityRange(t, pool, roomTypeID, 3, 1, 1)
 
 	cancelled, err := service.CancelBooking(context.Background(), created.ID, userID)
@@ -321,6 +323,7 @@ func TestAdminCancellationRestoresAvailabilityAndRecordsAuditActor(t *testing.T)
 	if err != nil {
 		t.Fatalf("CreateBooking() error = %v", err)
 	}
+	confirmBookingForTest(t, pool, created.ID)
 	assertAvailabilityRange(t, pool, roomTypeID, 3, 1, 1)
 
 	cancelled, err := service.CancelBookingAsAdmin(ctx, AdminCancellationInput{
@@ -372,6 +375,7 @@ func TestCancelBookingPreventsConcurrentDoubleCancellation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateBooking() error = %v", err)
 	}
+	confirmBookingForTest(t, pool, created.ID)
 
 	start := make(chan struct{})
 	results := make(chan error, 2)
@@ -420,6 +424,7 @@ func TestCancelBookingDoesNotExposeAnotherUsersBooking(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateBooking() error = %v", err)
 	}
+	confirmBookingForTest(t, pool, created.ID)
 
 	var otherUserID int64
 	err = pool.QueryRow(
@@ -450,6 +455,7 @@ func TestCancelBookingRollsBackPartialAvailabilityUpdate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateBooking() error = %v", err)
 	}
+	confirmBookingForTest(t, pool, created.ID)
 
 	_, err = pool.Exec(
 		context.Background(),
@@ -511,6 +517,7 @@ func TestCancelBookingRejectsStartedStay(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateBooking() error = %v", err)
 	}
+	confirmBookingForTest(t, pool, created.ID)
 
 	currentTime = time.Date(2030, time.January, 2, 12, 0, 0, 0, time.UTC)
 	_, err = service.CancelBooking(context.Background(), created.ID, userID)
@@ -646,6 +653,7 @@ func TestAvailabilitySearchReflectsBookingAndCancellation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateBooking() error = %v", err)
 	}
+	confirmBookingForTest(t, pool, created.ID)
 	afterBooking := search(1)
 	if len(afterBooking) != 1 || afterBooking[0].RoomsAvailable != 1 {
 		t.Errorf("availability after booking = %+v, want 1 room", afterBooking)
@@ -911,7 +919,7 @@ func newBookingIntegrationService(t *testing.T) (*pgxpool.Pool, *Service) {
 
 	applyIntegrationMigrations(t, pool)
 	queries := sqlc.New(pool)
-	return pool, NewService(pool, queries)
+	return pool, NewService(pool, queries, testPaymentSettings())
 }
 
 func applyIntegrationMigrations(t *testing.T, pool *pgxpool.Pool) {
@@ -1087,6 +1095,106 @@ func assertBookingStatus(t *testing.T, pool *pgxpool.Pool, bookingID int64, want
 	}
 	if status != want {
 		t.Errorf("booking status = %q, want %q", status, want)
+	}
+}
+
+func assertPendingPaymentForBooking(
+	t *testing.T,
+	pool *pgxpool.Pool,
+	bookingID int64,
+	wantAmountMinor int64,
+	wantCurrency string,
+	wantProvider string,
+	wantTTL time.Duration,
+) {
+	t.Helper()
+
+	var provider string
+	var providerKey string
+	var amountMinor int64
+	var currency string
+	var paymentStatus string
+	var expirySeconds float64
+	err := pool.QueryRow(
+		context.Background(),
+		`SELECT
+		     p.provider,
+		     p.provider_idempotency_key,
+		     p.amount_minor,
+		     p.currency,
+		     p.status,
+		     extract(epoch FROM (b.payment_expires_at - b.created_at))
+		 FROM payments AS p
+		 JOIN bookings AS b ON b.id = p.booking_id
+		 WHERE p.booking_id = $1`,
+		bookingID,
+	).Scan(&provider, &providerKey, &amountMinor, &currency, &paymentStatus, &expirySeconds)
+	if err != nil {
+		t.Fatalf("query pending payment: %v", err)
+	}
+	if provider != wantProvider {
+		t.Errorf("payment provider = %q, want %q", provider, wantProvider)
+	}
+	wantProviderKey := fmt.Sprintf("booking:%d:payment:create", bookingID)
+	if providerKey != wantProviderKey {
+		t.Errorf("payment provider key = %q, want %q", providerKey, wantProviderKey)
+	}
+	if amountMinor != wantAmountMinor || currency != wantCurrency {
+		t.Errorf(
+			"payment amount = %d %s, want %d %s",
+			amountMinor,
+			currency,
+			wantAmountMinor,
+			wantCurrency,
+		)
+	}
+	if paymentStatus != "pending" {
+		t.Errorf("payment status = %q, want pending", paymentStatus)
+	}
+	if gotTTL := time.Duration(expirySeconds * float64(time.Second)); gotTTL != wantTTL {
+		t.Errorf("payment expiry TTL = %v, want %v", gotTTL, wantTTL)
+	}
+}
+
+func confirmBookingForTest(t *testing.T, pool *pgxpool.Pool, bookingID int64) {
+	t.Helper()
+
+	commandTag, err := pool.Exec(
+		context.Background(),
+		`WITH paid AS (
+		     UPDATE payments
+		     SET status = 'succeeded',
+		         provider_payment_id = 'test-payment-' || booking_id::text,
+		         paid_at = now(),
+		         updated_at = now()
+		     WHERE booking_id = $1
+		       AND status = 'pending'
+		     RETURNING booking_id
+		 ), confirmed AS (
+		     UPDATE bookings AS b
+		     SET status = 'confirmed',
+		         updated_at = now()
+		     FROM paid
+		     WHERE b.id = paid.booking_id
+		       AND b.status = 'pending_payment'
+		     RETURNING b.id, b.user_id
+		 )
+		 INSERT INTO booking_status_history (
+		     booking_id,
+		     from_status,
+		     to_status,
+		     changed_by_user_id,
+		     reason
+		 )
+		 SELECT id, 'pending_payment', 'confirmed', user_id, 'Payment confirmed in test'
+		 FROM confirmed`,
+		bookingID,
+	)
+	if err != nil {
+		t.Fatalf("confirm booking fixture: %v", err)
+	}
+	if commandTag.RowsAffected() != 1 {
+		t.Fatalf("confirmed booking rows = %d, want 1", commandTag.RowsAffected())
 	}
 }
 

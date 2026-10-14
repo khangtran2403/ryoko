@@ -8,8 +8,43 @@ import (
 	"time"
 )
 
+func testPaymentSettings() PaymentSettings {
+	return PaymentSettings{Provider: "fake", PendingTTL: 15 * time.Minute}
+}
+
+func TestNewServiceValidatesAndNormalizesPaymentSettings(t *testing.T) {
+	t.Run("normalizes provider", func(t *testing.T) {
+		service := NewService(nil, nil, PaymentSettings{
+			Provider:   "  stripe  ",
+			PendingTTL: time.Minute,
+		})
+		if service.payment.Provider != "stripe" {
+			t.Errorf("provider = %q, want %q", service.payment.Provider, "stripe")
+		}
+	})
+
+	tests := []struct {
+		name     string
+		settings PaymentSettings
+	}{
+		{name: "empty provider", settings: PaymentSettings{PendingTTL: time.Minute}},
+		{name: "whitespace provider", settings: PaymentSettings{Provider: "  ", PendingTTL: time.Minute}},
+		{name: "sub-second TTL", settings: PaymentSettings{Provider: "fake", PendingTTL: time.Millisecond}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			defer func() {
+				if recover() == nil {
+					t.Fatal("NewService() did not panic")
+				}
+			}()
+			NewService(nil, nil, tt.settings)
+		})
+	}
+}
+
 func TestCancelBookingAsAdminValidatesInputBeforeStartingTransaction(t *testing.T) {
-	service := NewService(nil, nil)
+	service := NewService(nil, nil, testPaymentSettings())
 
 	tests := []struct {
 		name    string

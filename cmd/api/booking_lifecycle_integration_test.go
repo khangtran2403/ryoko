@@ -94,8 +94,8 @@ func TestBookingHTTPLifecycleIntegration(t *testing.T) {
 	)
 	var created handler.BookingResponse
 	decodeAPIResponse(t, createBody, &created)
-	if created.ID <= 0 || created.RoomTypeID != roomTypeID || created.Status != "confirmed" {
-		t.Fatalf("created booking = %+v, want confirmed booking for room type %d", created, roomTypeID)
+	if created.ID <= 0 || created.RoomTypeID != roomTypeID || created.Status != "pending_payment" {
+		t.Fatalf("created booking = %+v, want pending-payment booking for room type %d", created, roomTypeID)
 	}
 	if created.TotalPrice != "300.00" {
 		t.Errorf("created total price = %q, want %q", created.TotalPrice, "300.00")
@@ -112,7 +112,9 @@ func TestBookingHTTPLifecycleIntegration(t *testing.T) {
 	}
 	assertBookingInventory(t, pool, roomTypeID, 1, 3)
 	assertSingleBooking(t, pool)
+	assertHTTPPendingPayment(t, pool, created.ID, 300, "VND")
 	assertSearchReturnsHotel(t, client, searchURL, hotelID, false)
+	confirmHTTPBookingForTest(t, pool, created.ID)
 
 	bookingURL := server.URL + "/me/bookings/" + strconv.FormatInt(created.ID, 10)
 	fetchedBody := doAPIRequest(t, client, http.MethodGet, bookingURL, login.AccessToken, "", nil, http.StatusOK)
@@ -145,8 +147,11 @@ func TestBookingHTTPLifecycleIntegration(t *testing.T) {
 	)
 	var history []sqlc.BookingStatusHistory
 	decodeAPIResponse(t, historyBody, &history)
-	if len(history) != 2 || history[0].ToStatus != "confirmed" || history[1].ToStatus != "cancelled" {
-		t.Errorf("booking history = %+v, want confirmed then cancelled", history)
+	if len(history) != 3 ||
+		history[0].ToStatus != "pending_payment" ||
+		history[1].ToStatus != "confirmed" ||
+		history[2].ToStatus != "cancelled" {
+		t.Errorf("booking history = %+v, want pending_payment, confirmed, then cancelled", history)
 	}
 
 	assertBookingInventory(t, pool, roomTypeID, 0, 3)
@@ -293,6 +298,8 @@ func TestAdminBookingHTTPLifecycleIntegration(t *testing.T) {
 	var created handler.BookingResponse
 	decodeAPIResponse(t, createdBody, &created)
 	assertBookingInventory(t, pool, roomTypeID, 1, 3)
+	assertHTTPPendingPayment(t, pool, created.ID, 300, "VND")
+	confirmHTTPBookingForTest(t, pool, created.ID)
 
 	adminBookingsURL := server.URL + "/admin/bookings"
 	doAPIRequest(
@@ -338,8 +345,10 @@ func TestAdminBookingHTTPLifecycleIntegration(t *testing.T) {
 	)
 	var historyBefore []sqlc.BookingStatusHistory
 	decodeAPIResponse(t, historyBeforeBody, &historyBefore)
-	if len(historyBefore) != 1 || historyBefore[0].ToStatus != "confirmed" {
-		t.Errorf("history before admin cancellation = %+v, want initial confirmed transition", historyBefore)
+	if len(historyBefore) != 2 ||
+		historyBefore[0].ToStatus != "pending_payment" ||
+		historyBefore[1].ToStatus != "confirmed" {
+		t.Errorf("history before admin cancellation = %+v, want pending_payment then confirmed", historyBefore)
 	}
 
 	const cancellationReason = "Hotel closed for emergency maintenance"
@@ -361,8 +370,8 @@ func TestAdminBookingHTTPLifecycleIntegration(t *testing.T) {
 	)
 	var historyAfter []sqlc.BookingStatusHistory
 	decodeAPIResponse(t, historyAfterBody, &historyAfter)
-	if len(historyAfter) != 2 {
-		t.Fatalf("history entry count = %d, want 2; history = %+v", len(historyAfter), historyAfter)
+	if len(historyAfter) != 3 {
+		t.Fatalf("history entry count = %d, want 3; history = %+v", len(historyAfter), historyAfter)
 	}
 	var cancellation sqlc.BookingStatusHistory
 	for _, transition := range historyAfter {
@@ -820,7 +829,10 @@ func TestReviewHTTPLifecycleIntegration(t *testing.T) {
 		http.StatusConflict,
 	)
 
-	completionService := booking.NewService(pool, sqlc.New(pool))
+	completionService := booking.NewService(pool, sqlc.New(pool), booking.PaymentSettings{
+		Provider:   "fake",
+		PendingTTL: 15 * time.Minute,
+	})
 	completedCount, err := completionService.CompletePastBookings(
 		context.Background(),
 		checkOut.AddDate(0, 0, 1),
@@ -1255,7 +1267,10 @@ func newBookingLifecycleServer(
 		t.Fatalf("create test rate limiter: %v", err)
 	}
 
-	bookingService := booking.NewService(pool, queries)
+	bookingService := booking.NewService(pool, queries, booking.PaymentSettings{
+		Provider:   "fake",
+		PendingTTL: 15 * time.Minute,
+	})
 	adminBookingService := adminbooking.NewService(queries)
 	reviewService := review.NewService(queries)
 	diagnosticBookingService := &bookingLifecycleDiagnosticService{
@@ -1633,6 +1648,98 @@ func assertSingleBooking(t *testing.T, pool *pgxpool.Pool) {
 	}
 	if count != 1 {
 		t.Errorf("booking count = %d, want 1", count)
+	}
+}
+
+func assertHTTPPendingPayment(
+	t *testing.T,
+	pool *pgxpool.Pool,
+	bookingID int64,
+	wantAmountMinor int64,
+	wantCurrency string,
+) {
+	t.Helper()
+
+	var provider string
+	var providerKey string
+	var amountMinor int64
+	var currency string
+	var status string
+	var expirySeconds float64
+	err := pool.QueryRow(
+		context.Background(),
+		`SELECT
+		     p.provider,
+		     p.provider_idempotency_key,
+		     p.amount_minor,
+		     p.currency,
+		     p.status,
+		     extract(epoch FROM (b.payment_expires_at - b.created_at))
+		 FROM payments AS p
+		 JOIN bookings AS b ON b.id = p.booking_id
+		 WHERE p.booking_id = $1`,
+		bookingID,
+	).Scan(&provider, &providerKey, &amountMinor, &currency, &status, &expirySeconds)
+	if err != nil {
+		t.Fatalf("query HTTP pending payment: %v", err)
+	}
+	if provider != "fake" {
+		t.Errorf("payment provider = %q, want fake", provider)
+	}
+	wantProviderKey := fmt.Sprintf("booking:%d:payment:create", bookingID)
+	if providerKey != wantProviderKey {
+		t.Errorf("payment provider key = %q, want %q", providerKey, wantProviderKey)
+	}
+	if amountMinor != wantAmountMinor || currency != wantCurrency {
+		t.Errorf("payment amount = %d %s, want %d %s", amountMinor, currency, wantAmountMinor, wantCurrency)
+	}
+	if status != "pending" {
+		t.Errorf("payment status = %q, want pending", status)
+	}
+	if gotTTL := time.Duration(expirySeconds * float64(time.Second)); gotTTL != 15*time.Minute {
+		t.Errorf("payment expiry TTL = %v, want %v", gotTTL, 15*time.Minute)
+	}
+}
+
+func confirmHTTPBookingForTest(t *testing.T, pool *pgxpool.Pool, bookingID int64) {
+	t.Helper()
+
+	commandTag, err := pool.Exec(
+		context.Background(),
+		`WITH paid AS (
+		     UPDATE payments
+		     SET status = 'succeeded',
+		         provider_payment_id = 'http-test-payment-' || booking_id::text,
+		         paid_at = now(),
+		         updated_at = now()
+		     WHERE booking_id = $1
+		       AND status = 'pending'
+		     RETURNING booking_id
+		 ), confirmed AS (
+		     UPDATE bookings AS b
+		     SET status = 'confirmed',
+		         updated_at = now()
+		     FROM paid
+		     WHERE b.id = paid.booking_id
+		       AND b.status = 'pending_payment'
+		     RETURNING b.id, b.user_id
+		 )
+		 INSERT INTO booking_status_history (
+		     booking_id,
+		     from_status,
+		     to_status,
+		     changed_by_user_id,
+		     reason
+		 )
+		 SELECT id, 'pending_payment', 'confirmed', user_id, 'Payment confirmed in HTTP test'
+		 FROM confirmed`,
+		bookingID,
+	)
+	if err != nil {
+		t.Fatalf("confirm HTTP booking fixture: %v", err)
+	}
+	if commandTag.RowsAffected() != 1 {
+		t.Fatalf("confirmed HTTP booking rows = %d, want 1", commandTag.RowsAffected())
 	}
 }
 
