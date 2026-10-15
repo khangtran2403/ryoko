@@ -24,6 +24,7 @@ tags:
   - name: Images
   - name: Availability
   - name: Bookings
+  - name: Payments
   - name: Reviews
   - name: Administration
 
@@ -635,7 +636,7 @@ paths:
         content: {application/json: {schema: {$ref: '#/components/schemas/CreateBookingRequest'}}}
       responses:
         '201':
-          description: Booking confirmed
+          description: Booking created and awaiting payment
           content: {application/json: {schema: {$ref: '#/components/schemas/Booking'}}}
         '400': {$ref: '#/components/responses/BadRequest'}
         '401': {$ref: '#/components/responses/Unauthorized'}
@@ -690,6 +691,53 @@ paths:
         '404': {$ref: '#/components/responses/NotFound'}
         '409': {$ref: '#/components/responses/Conflict'}
         '500': {$ref: '#/components/responses/InternalError'}
+  /me/bookings/{bookingID}/payment-session:
+    parameters:
+      - {$ref: '#/components/parameters/BookingID'}
+    post:
+      tags: [Payments]
+      operationId: initiateBookingPayment
+      security: [{bearerAuth: []}]
+      responses:
+        '201':
+          description: Provider checkout session created or retrieved idempotently
+          content: {application/json: {schema: {$ref: '#/components/schemas/PaymentSession'}}}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '502': {$ref: '#/components/responses/BadGateway'}
+        '503': {$ref: '#/components/responses/ServiceUnavailable'}
+        '500': {$ref: '#/components/responses/InternalError'}
+  /payments/webhooks/fake:
+    post:
+      tags: [Payments]
+      operationId: receiveFakePaymentWebhook
+      description: |
+        Development-only fake-provider callback. The signature is the lowercase
+        hexadecimal HMAC-SHA256 of the exact request body, using
+        `PAYMENT_FAKE_WEBHOOK_SECRET` as the key.
+      security: []
+      parameters:
+        - name: X-Ryoko-Signature
+          in: header
+          required: true
+          schema: {type: string, pattern: '^[0-9a-f]{64}$'}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/FakePaymentWebhookEvent'}
+      responses:
+        '200':
+          description: Event received, including duplicate and ignored events
+          content: {application/json: {schema: {$ref: '#/components/schemas/PaymentWebhookResponse'}}}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '413': {description: Request body exceeds 64 KiB}
+        '415': {description: Content-Type is not application/json}
+        '500': {$ref: '#/components/responses/InternalError'}
+        '503': {$ref: '#/components/responses/ServiceUnavailable'}
   /me/bookings/{bookingID}/history:
     parameters:
       - {$ref: '#/components/parameters/BookingID'}
@@ -1023,6 +1071,12 @@ components:
     InternalError:
       description: Internal server error
       content: {text/plain: {schema: {$ref: '#/components/schemas/ErrorText'}}}
+    BadGateway:
+      description: Invalid or inconsistent response from the payment provider
+      content: {text/plain: {schema: {$ref: '#/components/schemas/ErrorText'}}}
+    ServiceUnavailable:
+      description: Payment provider is temporarily unavailable
+      content: {text/plain: {schema: {$ref: '#/components/schemas/ErrorText'}}}
 
   schemas:
     ErrorText: {type: string, description: Plain-text error ending with a newline}
@@ -1043,7 +1097,7 @@ components:
       type: number
       minimum: 0
       examples: [1750000.00]
-    BookingStatus: {type: string, enum: [confirmed, cancelled, completed]}
+    BookingStatus: {type: string, enum: [pending_payment, confirmed, cancelled, completed]}
     Pagination:
       type: object
       required: [page, page_size, has_more]
@@ -1275,6 +1329,38 @@ components:
       properties:
         bookings: {type: array, items: {$ref: '#/components/schemas/Booking'}}
         pagination: {$ref: '#/components/schemas/Pagination'}
+    PaymentSession:
+      type: object
+      required: [payment_id, provider_payment_id, amount_minor, currency]
+      properties:
+        payment_id: {type: integer, format: int64, minimum: 1}
+        provider_payment_id: {type: string, minLength: 1}
+        checkout_url: {type: string, format: uri}
+        client_secret: {type: string, minLength: 1}
+        amount_minor: {type: integer, format: int64, minimum: 1}
+        currency: {type: string, enum: [USD, VND]}
+      oneOf:
+        - required: [checkout_url]
+          not: {required: [client_secret]}
+        - required: [client_secret]
+          not: {required: [checkout_url]}
+    FakePaymentWebhookEvent:
+      type: object
+      additionalProperties: false
+      required: [id, type, provider_payment_id]
+      properties:
+        id: {type: string, minLength: 1}
+        type: {type: string, minLength: 1, example: payment.succeeded}
+        provider_payment_id: {type: string, minLength: 1}
+    PaymentWebhookResponse:
+      type: object
+      required: [received, processed, duplicate, ignored, already_processed]
+      properties:
+        received: {type: boolean}
+        processed: {type: boolean}
+        duplicate: {type: boolean}
+        ignored: {type: boolean}
+        already_processed: {type: boolean}
     BookingStatusHistory:
       type: object
       required: [id, booking_id, to_status, created_at]

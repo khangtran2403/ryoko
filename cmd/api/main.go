@@ -28,6 +28,7 @@ import (
 	"github.com/khangtran2403/ryoko/internal/middleware"
 	"github.com/khangtran2403/ryoko/internal/oauth"
 	"github.com/khangtran2403/ryoko/internal/passwordreset"
+	"github.com/khangtran2403/ryoko/internal/payments"
 	"github.com/khangtran2403/ryoko/internal/review"
 	"github.com/khangtran2403/ryoko/internal/roomtype"
 	"github.com/khangtran2403/ryoko/internal/session"
@@ -169,6 +170,24 @@ func main() {
 	if err != nil {
 		log.Fatalf("create authentication rate limiter: %v", err)
 	}
+	paymentGateway, err := newPaymentGateway(cfg.Payment)
+	if err != nil {
+		log.Fatalf("create payment gateway: %v", err)
+	}
+	paymentService := payments.NewService(queries, paymentGateway)
+	paymentHandler := handler.NewPaymentHandler(paymentService)
+	paymentWebhookService := payments.NewWebhookService(pool, queries)
+	paymentWebhookHandler := handler.NewPaymentWebhookHandler(paymentGateway, paymentWebhookService)
+	paymentExpirationService := payments.NewExpirationService(
+		pool,
+		queries,
+		cfg.Payment.ExpirationBatchSize,
+	)
+	paymentExpirationWorker := payments.NewExpirationWorker(
+		paymentExpirationService,
+		cfg.Payment.ExpirationInterval,
+		log.Default(),
+	)
 	bookingService := booking.NewService(pool, queries, booking.PaymentSettings{
 		Provider:   cfg.Payment.Provider,
 		PendingTTL: cfg.Payment.PendingTTL,
@@ -200,29 +219,31 @@ func main() {
 	addr := ":" + strconv.Itoa(cfg.API.Port)
 
 	apiHandler := newAPIHandler(apiDependencies{
-		healthHandler:        healthHandler,
-		hotelHandler:         hotelHandler,
-		roomTypeHandler:      roomTypeHandler,
-		amenityHandler:       amenityHandler,
-		userHandler:          userHandler,
-		authHandler:          authHandler,
-		oauthHandler:         oauthHandler,
-		passwordResetHandler: passwordResetHandler,
-		bookingHandler:       bookingHandler,
-		adminBookingHandler:  adminBookingHandler,
-		reviewHandler:        reviewHandler,
-		hotelImageHandler:    hotelImageHandler,
-		inventoryHandler:     inventoryHandler,
-		authMiddleware:       authMiddleware,
-		corsMiddleware:       corsMiddleware,
-		authRateLimiter:      authRateLimiter,
-		logger:               slog.Default(),
+		healthHandler:         healthHandler,
+		hotelHandler:          hotelHandler,
+		roomTypeHandler:       roomTypeHandler,
+		amenityHandler:        amenityHandler,
+		userHandler:           userHandler,
+		authHandler:           authHandler,
+		oauthHandler:          oauthHandler,
+		passwordResetHandler:  passwordResetHandler,
+		bookingHandler:        bookingHandler,
+		paymentHandler:        paymentHandler,
+		paymentWebhookHandler: paymentWebhookHandler,
+		adminBookingHandler:   adminBookingHandler,
+		reviewHandler:         reviewHandler,
+		hotelImageHandler:     hotelImageHandler,
+		inventoryHandler:      inventoryHandler,
+		authMiddleware:        authMiddleware,
+		corsMiddleware:        corsMiddleware,
+		authRateLimiter:       authRateLimiter,
+		logger:                slog.Default(),
 	})
 	server := newHTTPServer(addr, apiHandler)
 
 	var workerWG sync.WaitGroup
 
-	workerWG.Add(4)
+	workerWG.Add(5)
 	go func() {
 		defer workerWG.Done()
 		completionWorker.Run(appCtx)
@@ -238,6 +259,10 @@ func main() {
 	go func() {
 		defer workerWG.Done()
 		oauthCleanupWorker.Run(appCtx)
+	}()
+	go func() {
+		defer workerWG.Done()
+		paymentExpirationWorker.Run(appCtx)
 	}()
 
 	serverErrors := make(chan error, 1)

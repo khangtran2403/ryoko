@@ -70,8 +70,12 @@ type DatabaseConfig struct {
 }
 
 type PaymentConfig struct {
-	Provider   string
-	PendingTTL time.Duration
+	Provider            string
+	PendingTTL          time.Duration
+	ExpirationInterval  time.Duration
+	ExpirationBatchSize int32
+	FakeCheckoutBaseURL string
+	FakeWebhookSecret   string
 }
 
 var cfg *Config
@@ -216,13 +220,48 @@ func Load() (*Config, error) {
 	if err != nil {
 		return nil, fmt.Errorf("invalid OAUTH_CLEANUP_INTERVAL_MINUTES: %w", err)
 	}
-	paymentProvider := strings.TrimSpace(getEnv("PAYMENT_PROVIDER", ""))
+	environment := strings.ToLower(strings.TrimSpace(getEnv("ENV", "development")))
+	if environment == "" {
+		return nil, fmt.Errorf("ENV must not be empty")
+	}
+	paymentProvider := strings.ToLower(strings.TrimSpace(getEnv("PAYMENT_PROVIDER", "")))
 	if paymentProvider == "" {
 		return nil, fmt.Errorf("PAYMENT_PROVIDER is required")
+	}
+	if environment == "production" && paymentProvider == "fake" {
+		return nil, fmt.Errorf("PAYMENT_PROVIDER=fake is not allowed when ENV=production")
 	}
 	paymentPendingTTL, err := getEnvDuration("PAYMENT_PENDING_TTL_MINUTES", 15, "m")
 	if err != nil {
 		return nil, fmt.Errorf("invalid PAYMENT_PENDING_TTL_MINUTES: %w", err)
+	}
+	paymentExpirationInterval, err := getEnvDuration("PAYMENT_EXPIRATION_INTERVAL_SECONDS", 30, "s")
+	if err != nil {
+		return nil, fmt.Errorf("invalid PAYMENT_EXPIRATION_INTERVAL_SECONDS: %w", err)
+	}
+	paymentExpirationBatchSize, err := getEnvInt("PAYMENT_EXPIRATION_BATCH_SIZE", 100)
+	if err != nil || paymentExpirationBatchSize < 1 || paymentExpirationBatchSize > 1000 {
+		return nil, fmt.Errorf("invalid PAYMENT_EXPIRATION_BATCH_SIZE: must be an integer from 1 to 1000")
+	}
+	paymentFakeCheckoutBaseURL := strings.TrimSpace(getEnv(
+		"PAYMENT_FAKE_CHECKOUT_BASE_URL",
+		"http://localhost:3000/payments/fake",
+	))
+	paymentFakeWebhookSecret := getEnv("PAYMENT_FAKE_WEBHOOK_SECRET", "")
+	if paymentProvider == "fake" {
+		parsedPaymentCheckoutURL, err := url.Parse(paymentFakeCheckoutBaseURL)
+		if err != nil || parsedPaymentCheckoutURL.Scheme == "" || parsedPaymentCheckoutURL.Host == "" {
+			return nil, fmt.Errorf("PAYMENT_FAKE_CHECKOUT_BASE_URL must be an absolute URL")
+		}
+		if parsedPaymentCheckoutURL.Scheme != "http" && parsedPaymentCheckoutURL.Scheme != "https" {
+			return nil, fmt.Errorf("PAYMENT_FAKE_CHECKOUT_BASE_URL must use http or https")
+		}
+		if parsedPaymentCheckoutURL.User != nil || parsedPaymentCheckoutURL.Fragment != "" {
+			return nil, fmt.Errorf("PAYMENT_FAKE_CHECKOUT_BASE_URL must not contain credentials or a fragment")
+		}
+		if len([]byte(paymentFakeWebhookSecret)) < 32 {
+			return nil, fmt.Errorf("PAYMENT_FAKE_WEBHOOK_SECRET must contain at least 32 bytes")
+		}
 	}
 	frontendOrigin := strings.TrimSpace(getEnv("FRONTEND_ORIGIN", ""))
 	parsedFrontendOrigin, err := url.Parse(frontendOrigin)
@@ -326,10 +365,14 @@ func Load() (*Config, error) {
 			CleanupInterval:    oauthCleanupInterval,
 		},
 		Payment: PaymentConfig{
-			Provider:   paymentProvider,
-			PendingTTL: paymentPendingTTL,
+			Provider:            paymentProvider,
+			PendingTTL:          paymentPendingTTL,
+			ExpirationInterval:  paymentExpirationInterval,
+			ExpirationBatchSize: int32(paymentExpirationBatchSize),
+			FakeCheckoutBaseURL: paymentFakeCheckoutBaseURL,
+			FakeWebhookSecret:   paymentFakeWebhookSecret,
 		},
-		Environment: getEnv("ENV", "development"),
+		Environment: environment,
 	}
 
 	return cfg, nil

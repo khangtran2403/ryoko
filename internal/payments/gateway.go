@@ -6,9 +6,16 @@ import (
 )
 
 var (
-	ErrGatewayUnavailable = errors.New("payment gateway unavailable")
-	ErrInvalidCurrency    = errors.New("unsupported payment currency")
+	ErrGatewayUnavailable      = errors.New("payment gateway unavailable")
+	ErrInvalidCurrency         = errors.New("unsupported payment currency")
+	ErrInvalidCheckoutURL      = errors.New("invalid payment checkout URL")
+	ErrInvalidRequest          = errors.New("invalid payment gateway request")
+	ErrInvalidWebhookSecret    = errors.New("invalid payment webhook secret")
+	ErrInvalidWebhookPayload   = errors.New("invalid payment webhook payload")
+	ErrInvalidWebhookSignature = errors.New("invalid payment webhook signature")
 )
+
+const PaymentSucceededEvent = "payment.succeeded"
 
 type CreatePaymentRequest struct {
 	PaymentID      int64
@@ -32,8 +39,19 @@ type RefundRequest struct {
 	IdempotencyKey    string
 }
 
+type WebhookEvent struct {
+	Provider          string
+	ProviderEventID   string
+	Type              string
+	ProviderPaymentID string
+}
+
 type Gateway interface {
 	Provider() string
 	CreatePayment(ctx context.Context, request CreatePaymentRequest) (PaymentSession, error)
 	RefundPayment(ctx context.Context, request RefundRequest) error
+}
+
+type WebhookVerifier interface {
+	VerifyWebhook(payload []byte, signature string) (WebhookEvent, error)
 }

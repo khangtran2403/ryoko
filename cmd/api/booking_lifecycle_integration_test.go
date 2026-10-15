@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
@@ -19,6 +20,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -33,17 +35,19 @@ import (
 	"github.com/khangtran2403/ryoko/internal/middleware"
 	appoauth "github.com/khangtran2403/ryoko/internal/oauth"
 	"github.com/khangtran2403/ryoko/internal/passwordreset"
+	"github.com/khangtran2403/ryoko/internal/payments"
 	"github.com/khangtran2403/ryoko/internal/review"
 	"github.com/khangtran2403/ryoko/internal/session"
 )
 
 const (
-	lifecycleJWTSecret   = "booking-lifecycle-test-secret-at-least-32-bytes"
-	lifecycleJWTIssuer   = "ryoko-test"
-	lifecycleJWTAudience = "ryoko-test-api"
-	lifecycleOrigin      = "http://localhost:3000"
-	lifecycleResetPepper = "password-reset-lifecycle-pepper-at-least-32-bytes"
-	lifecycleOAuthSecret = "oauth-lifecycle-cookie-secret-at-least-32-bytes"
+	lifecycleJWTSecret            = "booking-lifecycle-test-secret-at-least-32-bytes"
+	lifecycleJWTIssuer            = "ryoko-test"
+	lifecycleJWTAudience          = "ryoko-test-api"
+	lifecycleOrigin               = "http://localhost:3000"
+	lifecycleResetPepper          = "password-reset-lifecycle-pepper-at-least-32-bytes"
+	lifecyclePaymentWebhookSecret = "lifecycle-payment-webhook-secret-at-least-32-bytes"
+	lifecycleOAuthSecret          = "oauth-lifecycle-cookie-secret-at-least-32-bytes"
 )
 
 func TestBookingHTTPLifecycleIntegration(t *testing.T) {
@@ -110,11 +114,44 @@ func TestBookingHTTPLifecycleIntegration(t *testing.T) {
 	if duplicate.ID != created.ID {
 		t.Errorf("idempotent booking ID = %d, want %d", duplicate.ID, created.ID)
 	}
+	paymentSessionBody := doAPIRequest(
+		t,
+		client,
+		http.MethodPost,
+		server.URL+"/me/bookings/"+strconv.FormatInt(created.ID, 10)+"/payment-session",
+		login.AccessToken,
+		"",
+		nil,
+		http.StatusCreated,
+	)
+	var paymentSession handler.PaymentSessionResponse
+	decodeAPIResponse(t, paymentSessionBody, &paymentSession)
+	if paymentSession.PaymentID <= 0 ||
+		!strings.HasPrefix(paymentSession.ProviderPaymentID, "fake-payment-") ||
+		!strings.HasPrefix(paymentSession.CheckoutURL, lifecycleOrigin+"/payments/fake?") ||
+		paymentSession.ClientSecret != "" ||
+		paymentSession.AmountMinor != 300 ||
+		paymentSession.Currency != "VND" {
+		t.Errorf("payment session = %+v, want fake VND checkout session", paymentSession)
+	}
 	assertBookingInventory(t, pool, roomTypeID, 1, 3)
 	assertSingleBooking(t, pool)
 	assertHTTPPendingPayment(t, pool, created.ID, 300, "VND")
 	assertSearchReturnsHotel(t, client, searchURL, hotelID, false)
-	confirmHTTPBookingForTest(t, pool, created.ID)
+	webhookPayload, err := json.Marshal(map[string]any{
+		"id":                  "booking-lifecycle-payment-succeeded",
+		"type":                payments.PaymentSucceededEvent,
+		"provider_payment_id": paymentSession.ProviderPaymentID,
+	})
+	if err != nil {
+		t.Fatalf("encode payment webhook: %v", err)
+	}
+	webhookBody := doPaymentWebhookRequest(t, client, server.URL, webhookPayload, http.StatusOK)
+	var webhookResponse handler.PaymentWebhookResponse
+	decodeAPIResponse(t, webhookBody, &webhookResponse)
+	if !webhookResponse.Received || !webhookResponse.Processed {
+		t.Errorf("webhook response = %+v, want received and processed", webhookResponse)
+	}
 
 	bookingURL := server.URL + "/me/bookings/" + strconv.FormatInt(created.ID, 10)
 	fetchedBody := doAPIRequest(t, client, http.MethodGet, bookingURL, login.AccessToken, "", nil, http.StatusOK)
@@ -1271,6 +1308,15 @@ func newBookingLifecycleServer(
 		Provider:   "fake",
 		PendingTTL: 15 * time.Minute,
 	})
+	paymentGateway, err := payments.NewFakeGateway(
+		lifecycleOrigin+"/payments/fake",
+		lifecyclePaymentWebhookSecret,
+	)
+	if err != nil {
+		t.Fatalf("create test payment gateway: %v", err)
+	}
+	paymentService := payments.NewService(queries, paymentGateway)
+	paymentWebhookService := payments.NewWebhookService(pool, queries)
 	adminBookingService := adminbooking.NewService(queries)
 	reviewService := review.NewService(queries)
 	diagnosticBookingService := &bookingLifecycleDiagnosticService{
@@ -1289,15 +1335,17 @@ func newBookingLifecycleServer(
 			passwordResetService,
 			log.New(io.Discard, "", 0),
 		),
-		bookingHandler:      handler.NewBookingHandler(diagnosticBookingService),
-		adminBookingHandler: handler.NewAdminBookingHandler(adminBookingService, diagnosticBookingService),
-		reviewHandler:       handler.NewReviewHandler(reviewService),
-		hotelImageHandler:   new(handler.HotelImageHandler),
-		inventoryHandler:    new(handler.InventoryHandler),
-		authMiddleware:      middleware.NewAuthMiddleware(tokenManager),
-		corsMiddleware:      corsMiddleware,
-		authRateLimiter:     rateLimiter,
-		logger:              logger,
+		bookingHandler:        handler.NewBookingHandler(diagnosticBookingService),
+		paymentHandler:        handler.NewPaymentHandler(paymentService),
+		paymentWebhookHandler: handler.NewPaymentWebhookHandler(paymentGateway, paymentWebhookService),
+		adminBookingHandler:   handler.NewAdminBookingHandler(adminBookingService, diagnosticBookingService),
+		reviewHandler:         handler.NewReviewHandler(reviewService),
+		hotelImageHandler:     new(handler.HotelImageHandler),
+		inventoryHandler:      new(handler.InventoryHandler),
+		authMiddleware:        middleware.NewAuthMiddleware(tokenManager),
+		corsMiddleware:        corsMiddleware,
+		authRateLimiter:       rateLimiter,
+		logger:                logger,
 	})
 	return httptest.NewServer(apiHandler)
 }
@@ -1534,6 +1582,50 @@ func doAPIRequest(
 	}
 	if response.StatusCode != wantStatus {
 		t.Fatalf("%s %s status = %d, want %d; body = %q", method, url, response.StatusCode, wantStatus, body)
+	}
+	return body
+}
+
+func doPaymentWebhookRequest(
+	t *testing.T,
+	client *http.Client,
+	serverURL string,
+	payload []byte,
+	wantStatus int,
+) []byte {
+	t.Helper()
+
+	mac := hmac.New(sha256.New, []byte(lifecyclePaymentWebhookSecret))
+	_, _ = mac.Write(payload)
+	signature := hex.EncodeToString(mac.Sum(nil))
+	request, err := http.NewRequestWithContext(
+		context.Background(),
+		http.MethodPost,
+		serverURL+"/payments/webhooks/fake",
+		bytes.NewReader(payload),
+	)
+	if err != nil {
+		t.Fatalf("create payment webhook request: %v", err)
+	}
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set(handler.FakeWebhookSignatureHeader, signature)
+
+	response, err := client.Do(request)
+	if err != nil {
+		t.Fatalf("send payment webhook request: %v", err)
+	}
+	defer response.Body.Close()
+	body, err := io.ReadAll(response.Body)
+	if err != nil {
+		t.Fatalf("read payment webhook response: %v", err)
+	}
+	if response.StatusCode != wantStatus {
+		t.Fatalf(
+			"POST payment webhook status = %d, want %d; body = %q",
+			response.StatusCode,
+			wantStatus,
+			body,
+		)
 	}
 	return body
 }

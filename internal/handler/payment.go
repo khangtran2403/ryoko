@@ -65,7 +65,8 @@ func (h *PaymentHandler) InitiatePayment(w http.ResponseWriter, r *http.Request)
 		errors.Is(err, payments.ErrProviderPaymentIDRequired),
 		errors.Is(err, payments.ErrProviderPaymentIDMismatch),
 		errors.Is(err, payments.ErrCheckoutURLOrClientSecretRequired),
-		errors.Is(err, payments.ErrInvalidCurrency):
+		errors.Is(err, payments.ErrInvalidCurrency),
+		errors.Is(err, payments.ErrInvalidRequest):
 		http.Error(w, "Payment provider error", http.StatusBadGateway)
 		return
 	case err != nil:

@@ -62,6 +62,21 @@ func TestNewAPIHandlerProtectsAuthenticatedRoutes(t *testing.T) {
 	}
 }
 
+func TestNewAPIHandlerProtectsPaymentSessionRoute(t *testing.T) {
+	apiHandler := newTestAPIHandler(t)
+	request := httptest.NewRequest(http.MethodPost, "/me/bookings/88/payment-session", nil)
+	response := httptest.NewRecorder()
+
+	apiHandler.ServeHTTP(response, request)
+
+	if response.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want %d", response.Code, http.StatusUnauthorized)
+	}
+	if response.Header().Get("WWW-Authenticate") != "Bearer" {
+		t.Errorf("WWW-Authenticate = %q, want Bearer", response.Header().Get("WWW-Authenticate"))
+	}
+}
+
 func TestAPIHandlerCORSBoundary(t *testing.T) {
 	t.Run("allowed preflight", func(t *testing.T) {
 		apiHandler := newTestAPIHandler(t)
@@ -288,22 +303,24 @@ func newTestAPIHandlerWithTokenManager(t *testing.T) (http.Handler, *auth.TokenM
 	}
 
 	return newAPIHandler(apiDependencies{
-		healthHandler:        handler.NewHealthHandler(healthyDatabase{}, time.Second, logger),
-		hotelHandler:         new(handler.HotelHandler),
-		roomTypeHandler:      new(handler.RoomTypeHandler),
-		amenityHandler:       new(handler.AmenityHandler),
-		userHandler:          new(handler.UserHandler),
-		authHandler:          new(handler.AuthHandler),
-		oauthHandler:         new(handler.OAuthHandler),
-		passwordResetHandler: new(handler.PasswordResetHandler),
-		bookingHandler:       new(handler.BookingHandler),
-		adminBookingHandler:  new(handler.AdminBookingHandler),
-		reviewHandler:        new(handler.ReviewHandler),
-		hotelImageHandler:    new(handler.HotelImageHandler),
-		inventoryHandler:     new(handler.InventoryHandler),
-		authMiddleware:       middleware.NewAuthMiddleware(tokenManager),
-		corsMiddleware:       corsMiddleware,
-		authRateLimiter:      authRateLimiter,
-		logger:               logger,
+		healthHandler:         handler.NewHealthHandler(healthyDatabase{}, time.Second, logger),
+		hotelHandler:          new(handler.HotelHandler),
+		roomTypeHandler:       new(handler.RoomTypeHandler),
+		amenityHandler:        new(handler.AmenityHandler),
+		userHandler:           new(handler.UserHandler),
+		authHandler:           new(handler.AuthHandler),
+		oauthHandler:          new(handler.OAuthHandler),
+		passwordResetHandler:  new(handler.PasswordResetHandler),
+		bookingHandler:        new(handler.BookingHandler),
+		paymentHandler:        new(handler.PaymentHandler),
+		paymentWebhookHandler: new(handler.PaymentWebhookHandler),
+		adminBookingHandler:   new(handler.AdminBookingHandler),
+		reviewHandler:         new(handler.ReviewHandler),
+		hotelImageHandler:     new(handler.HotelImageHandler),
+		inventoryHandler:      new(handler.InventoryHandler),
+		authMiddleware:        middleware.NewAuthMiddleware(tokenManager),
+		corsMiddleware:        corsMiddleware,
+		authRateLimiter:       authRateLimiter,
+		logger:                logger,
 	}), tokenManager
 }

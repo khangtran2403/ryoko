@@ -38,18 +38,34 @@ func TestLoadPaymentConfig(t *testing.T) {
 	setRequiredSMTPEnv(t)
 	t.Setenv("JWT_SECRET", "test-secret-that-is-at-least-32-bytes-long")
 	t.Setenv("PASSWORD_RESET_PEPPER", "test-password-reset-pepper-at-least-32-bytes-long")
-	t.Setenv("PAYMENT_PROVIDER", "  stripe  ")
+	t.Setenv("PAYMENT_PROVIDER", "  FaKe  ")
 	t.Setenv("PAYMENT_PENDING_TTL_MINUTES", "20")
+	t.Setenv("PAYMENT_EXPIRATION_INTERVAL_SECONDS", "45")
+	t.Setenv("PAYMENT_EXPIRATION_BATCH_SIZE", "250")
+	t.Setenv("PAYMENT_FAKE_CHECKOUT_BASE_URL", "https://app.example.com/payments/fake")
+	t.Setenv("PAYMENT_FAKE_WEBHOOK_SECRET", "custom-payment-webhook-secret-at-least-32-bytes")
 
 	loaded, err := Load()
 	if err != nil {
 		t.Fatalf("Load() error = %v", err)
 	}
-	if loaded.Payment.Provider != "stripe" {
-		t.Errorf("Payment.Provider = %q, want %q", loaded.Payment.Provider, "stripe")
+	if loaded.Payment.Provider != "fake" {
+		t.Errorf("Payment.Provider = %q, want %q", loaded.Payment.Provider, "fake")
 	}
 	if loaded.Payment.PendingTTL != 20*time.Minute {
 		t.Errorf("Payment.PendingTTL = %v, want %v", loaded.Payment.PendingTTL, 20*time.Minute)
+	}
+	if loaded.Payment.ExpirationInterval != 45*time.Second {
+		t.Errorf("Payment.ExpirationInterval = %v, want %v", loaded.Payment.ExpirationInterval, 45*time.Second)
+	}
+	if loaded.Payment.ExpirationBatchSize != 250 {
+		t.Errorf("Payment.ExpirationBatchSize = %d, want 250", loaded.Payment.ExpirationBatchSize)
+	}
+	if loaded.Payment.FakeCheckoutBaseURL != "https://app.example.com/payments/fake" {
+		t.Errorf("Payment.FakeCheckoutBaseURL = %q", loaded.Payment.FakeCheckoutBaseURL)
+	}
+	if loaded.Payment.FakeWebhookSecret != "custom-payment-webhook-secret-at-least-32-bytes" {
+		t.Error("Payment.FakeWebhookSecret does not match configured value")
 	}
 }
 
@@ -62,6 +78,15 @@ func TestLoadRejectsInvalidPaymentConfig(t *testing.T) {
 		{name: "empty provider", key: "PAYMENT_PROVIDER", value: "   "},
 		{name: "invalid pending TTL", key: "PAYMENT_PENDING_TTL_MINUTES", value: "invalid"},
 		{name: "zero pending TTL", key: "PAYMENT_PENDING_TTL_MINUTES", value: "0"},
+		{name: "zero expiration interval", key: "PAYMENT_EXPIRATION_INTERVAL_SECONDS", value: "0"},
+		{name: "invalid expiration batch size", key: "PAYMENT_EXPIRATION_BATCH_SIZE", value: "invalid"},
+		{name: "zero expiration batch size", key: "PAYMENT_EXPIRATION_BATCH_SIZE", value: "0"},
+		{name: "large expiration batch size", key: "PAYMENT_EXPIRATION_BATCH_SIZE", value: "1001"},
+		{name: "relative fake checkout URL", key: "PAYMENT_FAKE_CHECKOUT_BASE_URL", value: "/payments/fake"},
+		{name: "unsupported fake checkout scheme", key: "PAYMENT_FAKE_CHECKOUT_BASE_URL", value: "ftp://example.com/payments/fake"},
+		{name: "fake checkout URL with credentials", key: "PAYMENT_FAKE_CHECKOUT_BASE_URL", value: "https://user@example.com/payments/fake"},
+		{name: "fake checkout URL with fragment", key: "PAYMENT_FAKE_CHECKOUT_BASE_URL", value: "https://example.com/payments/fake#fragment"},
+		{name: "short fake webhook secret", key: "PAYMENT_FAKE_WEBHOOK_SECRET", value: "too-short"},
 	}
 
 	for _, tt := range tests {
@@ -79,6 +104,22 @@ func TestLoadRejectsInvalidPaymentConfig(t *testing.T) {
 				t.Errorf("error = %q, want key %q", err, tt.key)
 			}
 		})
+	}
+}
+
+func TestLoadRejectsFakePaymentProviderInProduction(t *testing.T) {
+	setRequiredSMTPEnv(t)
+	t.Setenv("JWT_SECRET", "test-secret-that-is-at-least-32-bytes-long")
+	t.Setenv("PASSWORD_RESET_PEPPER", "test-password-reset-pepper-at-least-32-bytes-long")
+	t.Setenv("ENV", "production")
+	t.Setenv("PAYMENT_PROVIDER", "fake")
+
+	_, err := Load()
+	if err == nil {
+		t.Fatal("Load() returned nil error")
+	}
+	if !strings.Contains(err.Error(), "PAYMENT_PROVIDER=fake") {
+		t.Errorf("error = %q, want fake-provider production rejection", err)
 	}
 }
 
@@ -552,6 +593,9 @@ func setRequiredSMTPEnv(t *testing.T) {
 	t.Setenv("OAUTH_CLEANUP_INTERVAL_MINUTES", "30")
 	t.Setenv("FRONTEND_ORIGIN", "http://localhost:3000")
 	t.Setenv("REFRESH_COOKIE_SECURE", "false")
+	t.Setenv("ENV", "development")
 	t.Setenv("PAYMENT_PROVIDER", "fake")
 	t.Setenv("PAYMENT_PENDING_TTL_MINUTES", "15")
+	t.Setenv("PAYMENT_FAKE_CHECKOUT_BASE_URL", "http://localhost:3000/payments/fake")
+	t.Setenv("PAYMENT_FAKE_WEBHOOK_SECRET", "test-payment-webhook-secret-at-least-32-bytes")
 }

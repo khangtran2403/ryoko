@@ -13,23 +13,25 @@ import (
 // Keeping construction outside this type lets main own infrastructure startup,
 // while tests can exercise the same router and middleware stack as production.
 type apiDependencies struct {
-	healthHandler        *handler.HealthHandler
-	hotelHandler         *handler.HotelHandler
-	roomTypeHandler      *handler.RoomTypeHandler
-	amenityHandler       *handler.AmenityHandler
-	userHandler          *handler.UserHandler
-	authHandler          *handler.AuthHandler
-	oauthHandler         *handler.OAuthHandler
-	passwordResetHandler *handler.PasswordResetHandler
-	bookingHandler       *handler.BookingHandler
-	adminBookingHandler  *handler.AdminBookingHandler
-	reviewHandler        *handler.ReviewHandler
-	hotelImageHandler    *handler.HotelImageHandler
-	inventoryHandler     *handler.InventoryHandler
-	authMiddleware       *middleware.AuthMiddleware
-	corsMiddleware       *middleware.CORSMiddleware
-	authRateLimiter      *middleware.IPRateLimiter
-	logger               *slog.Logger
+	healthHandler         *handler.HealthHandler
+	hotelHandler          *handler.HotelHandler
+	roomTypeHandler       *handler.RoomTypeHandler
+	amenityHandler        *handler.AmenityHandler
+	userHandler           *handler.UserHandler
+	authHandler           *handler.AuthHandler
+	oauthHandler          *handler.OAuthHandler
+	passwordResetHandler  *handler.PasswordResetHandler
+	bookingHandler        *handler.BookingHandler
+	paymentHandler        *handler.PaymentHandler
+	paymentWebhookHandler *handler.PaymentWebhookHandler
+	adminBookingHandler   *handler.AdminBookingHandler
+	reviewHandler         *handler.ReviewHandler
+	hotelImageHandler     *handler.HotelImageHandler
+	inventoryHandler      *handler.InventoryHandler
+	authMiddleware        *middleware.AuthMiddleware
+	corsMiddleware        *middleware.CORSMiddleware
+	authRateLimiter       *middleware.IPRateLimiter
+	logger                *slog.Logger
 }
 
 func newAPIHandler(deps apiDependencies) http.Handler {
@@ -75,6 +77,8 @@ func newAPIHandler(deps apiDependencies) http.Handler {
 	mux.Handle("GET /me/bookings/{bookingID}/history", deps.authMiddleware.Authenticate(http.HandlerFunc(deps.bookingHandler.ListBookingStatusHistoryForUser)))
 	mux.Handle("POST /room-types/{roomTypeID}/bookings", deps.authMiddleware.Authenticate(http.HandlerFunc(deps.bookingHandler.CreateBooking)))
 	mux.Handle("POST /me/bookings/{bookingID}/cancel", deps.authMiddleware.Authenticate(http.HandlerFunc(deps.bookingHandler.CancelBooking)))
+	mux.Handle("POST /me/bookings/{bookingID}/payment-session", deps.authMiddleware.Authenticate(http.HandlerFunc(deps.paymentHandler.InitiatePayment)))
+	mux.HandleFunc("POST /payments/webhooks/fake", deps.paymentWebhookHandler.Handle)
 	mux.Handle("POST /me/bookings/{bookingID}/review", deps.authMiddleware.Authenticate(http.HandlerFunc(deps.reviewHandler.CreateReview)))
 	mux.Handle("PUT /me/reviews/{reviewID}", deps.authMiddleware.Authenticate(http.HandlerFunc(deps.reviewHandler.UpdateReviewByUser)))
 	mux.Handle("DELETE /me/reviews/{reviewID}", deps.authMiddleware.Authenticate(http.HandlerFunc(deps.reviewHandler.DeleteReview)))

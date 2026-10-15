@@ -146,6 +146,26 @@ WHERE provider = sqlc.arg(provider)
   AND provider_payment_id = sqlc.arg(provider_payment_id)
 FOR UPDATE;
 
+-- name: GetPaymentByProviderID :one
+SELECT
+    id,
+    booking_id,
+    provider,
+    provider_payment_id,
+    provider_idempotency_key,
+    amount_minor,
+    currency,
+    status,
+    failure_code,
+    failure_message,
+    paid_at,
+    refunded_at,
+    created_at,
+    updated_at
+FROM payments
+WHERE provider = sqlc.arg(provider)
+  AND provider_payment_id = sqlc.arg(provider_payment_id);
+
 -- name: RecordPaymentFailure :one
 UPDATE payments
 SET

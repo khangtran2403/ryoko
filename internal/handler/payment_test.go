@@ -156,6 +156,7 @@ func TestPaymentHandlerInitiatePaymentMapsServiceErrors(t *testing.T) {
 		{name: "provider ID mismatch", err: payments.ErrProviderPaymentIDMismatch, wantStatus: http.StatusBadGateway, wantBody: "Payment provider error"},
 		{name: "invalid checkout action", err: payments.ErrCheckoutURLOrClientSecretRequired, wantStatus: http.StatusBadGateway, wantBody: "Payment provider error"},
 		{name: "unsupported provider currency", err: payments.ErrInvalidCurrency, wantStatus: http.StatusBadGateway, wantBody: "Payment provider error"},
+		{name: "invalid gateway request", err: payments.ErrInvalidRequest, wantStatus: http.StatusBadGateway, wantBody: "Payment provider error"},
 		{name: "unexpected", err: errors.New("database failed"), wantStatus: http.StatusInternalServerError, wantBody: "Failed to initiate payment"},
 	}
 

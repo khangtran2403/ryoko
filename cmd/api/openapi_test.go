@@ -83,7 +83,7 @@ func TestOpenAPIOperationIDsAreUnique(t *testing.T) {
 		}
 		seen[operationID] = struct{}{}
 	}
-	if len(seen) != 53 {
-		t.Errorf("operationId count = %d, want 53", len(seen))
+	if len(seen) != 55 {
+		t.Errorf("operationId count = %d, want 55", len(seen))
 	}
 }
