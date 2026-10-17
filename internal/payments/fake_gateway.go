@@ -104,6 +104,8 @@ func (g *FakeGateway) VerifyWebhook(payload []byte, signature string) (WebhookEv
 		ID                string `json:"id"`
 		Type              string `json:"type"`
 		ProviderPaymentID string `json:"provider_payment_id"`
+		FailureCode       string `json:"failure_code"`
+		FailureMessage    string `json:"failure_message"`
 	}
 	decoder := json.NewDecoder(bytes.NewReader(payload))
 	decoder.DisallowUnknownFields()
@@ -117,7 +119,16 @@ func (g *FakeGateway) VerifyWebhook(payload []byte, signature string) (WebhookEv
 	decoded.ID = strings.TrimSpace(decoded.ID)
 	decoded.Type = strings.TrimSpace(decoded.Type)
 	decoded.ProviderPaymentID = strings.TrimSpace(decoded.ProviderPaymentID)
+	decoded.FailureCode = strings.TrimSpace(decoded.FailureCode)
+	decoded.FailureMessage = strings.TrimSpace(decoded.FailureMessage)
 	if decoded.ID == "" || decoded.Type == "" || decoded.ProviderPaymentID == "" {
+		return WebhookEvent{}, ErrInvalidWebhookPayload
+	}
+	if decoded.Type == PaymentFailedEvent {
+		if decoded.FailureCode == "" || len(decoded.FailureCode) > 100 || len(decoded.FailureMessage) > 1000 {
+			return WebhookEvent{}, ErrInvalidWebhookPayload
+		}
+	} else if decoded.FailureCode != "" || decoded.FailureMessage != "" {
 		return WebhookEvent{}, ErrInvalidWebhookPayload
 	}
 
@@ -126,6 +137,8 @@ func (g *FakeGateway) VerifyWebhook(payload []byte, signature string) (WebhookEv
 		ProviderEventID:   decoded.ID,
 		Type:              decoded.Type,
 		ProviderPaymentID: decoded.ProviderPaymentID,
+		FailureCode:       decoded.FailureCode,
+		FailureMessage:    decoded.FailureMessage,
 	}, nil
 }
 

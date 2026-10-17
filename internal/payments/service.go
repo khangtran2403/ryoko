@@ -15,6 +15,7 @@ var (
 	ErrInvalidBookingID                  = errors.New("booking ID must be positive")
 	ErrInvalidUserID                     = errors.New("user ID must be positive")
 	ErrPaymentNotAvailable               = errors.New("payment not available")
+	ErrPaymentNotFound                   = errors.New("payment not found")
 	ErrProviderMismatch                  = errors.New("payment provider mismatch")
 	ErrProviderPaymentIDRequired         = errors.New("provider payment ID is required")
 	ErrProviderPaymentIDMismatch         = errors.New("provider payment ID mismatch")
@@ -23,8 +24,29 @@ var (
 
 type paymentQueries interface {
 	GetInitiatablePaymentForUser(context.Context, sqlc.GetInitiatablePaymentForUserParams) (sqlc.Payment, error)
+	GetPaymentByBookingIDForUser(context.Context, sqlc.GetPaymentByBookingIDForUserParams) (sqlc.Payment, error)
 	SetPaymentProviderID(context.Context, sqlc.SetPaymentProviderIDParams) (sqlc.Payment, error)
 	GetPaymentByBookingID(context.Context, int64) (sqlc.Payment, error)
+}
+
+func (s *Service) GetPaymentStatus(ctx context.Context, userID int64, bookingID int64) (sqlc.Payment, error) {
+	if bookingID <= 0 {
+		return sqlc.Payment{}, ErrInvalidBookingID
+	}
+	if userID <= 0 {
+		return sqlc.Payment{}, ErrInvalidUserID
+	}
+	payment, err := s.queries.GetPaymentByBookingIDForUser(ctx, sqlc.GetPaymentByBookingIDForUserParams{
+		BookingID: bookingID,
+		UserID:    userID,
+	})
+	if errors.Is(err, pgx.ErrNoRows) {
+		return sqlc.Payment{}, ErrPaymentNotFound
+	}
+	if err != nil {
+		return sqlc.Payment{}, fmt.Errorf("get payment status: %w", err)
+	}
+	return payment, nil
 }
 
 type Service struct {

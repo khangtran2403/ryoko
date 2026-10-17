@@ -708,6 +708,21 @@ paths:
         '502': {$ref: '#/components/responses/BadGateway'}
         '503': {$ref: '#/components/responses/ServiceUnavailable'}
         '500': {$ref: '#/components/responses/InternalError'}
+  /me/bookings/{bookingID}/payment:
+    parameters:
+      - {$ref: '#/components/parameters/BookingID'}
+    get:
+      tags: [Payments]
+      operationId: getCurrentUserBookingPayment
+      security: [{bearerAuth: []}]
+      responses:
+        '200':
+          description: Payment status for a booking owned by the current user
+          content: {application/json: {schema: {$ref: '#/components/schemas/PaymentStatus'}}}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '500': {$ref: '#/components/responses/InternalError'}
   /payments/webhooks/fake:
     post:
       tags: [Payments]
@@ -1344,6 +1359,19 @@ components:
           not: {required: [client_secret]}
         - required: [client_secret]
           not: {required: [checkout_url]}
+    PaymentStatus:
+      type: object
+      required: [payment_id, booking_id, amount_minor, currency, status, paid_at, refunded_at, retryable, failure_code]
+      properties:
+        payment_id: {type: integer, format: int64, minimum: 1}
+        booking_id: {type: integer, format: int64, minimum: 1}
+        amount_minor: {type: integer, format: int64, minimum: 1}
+        currency: {type: string, enum: [USD, VND]}
+        status: {type: string, enum: [pending, succeeded, expired, refund_pending, refunded]}
+        paid_at: {type: [string, 'null'], format: date-time}
+        refunded_at: {type: [string, 'null'], format: date-time}
+        retryable: {type: boolean}
+        failure_code: {type: [string, 'null'], enum: [payment_failed, null]}
     FakePaymentWebhookEvent:
       type: object
       additionalProperties: false
@@ -1352,15 +1380,19 @@ components:
         id: {type: string, minLength: 1}
         type: {type: string, minLength: 1, example: payment.succeeded}
         provider_payment_id: {type: string, minLength: 1}
+        failure_code: {type: string, minLength: 1, maxLength: 100}
+        failure_message: {type: string, maxLength: 1000}
     PaymentWebhookResponse:
       type: object
-      required: [received, processed, duplicate, ignored, already_processed]
+      required: [received, processed, duplicate, ignored, already_processed, refund_queued, retryable]
       properties:
         received: {type: boolean}
         processed: {type: boolean}
         duplicate: {type: boolean}
         ignored: {type: boolean}
         already_processed: {type: boolean}
+        refund_queued: {type: boolean, description: A late captured payment was queued for an automatic refund}
+        retryable: {type: boolean, description: A failed payment can be retried before the booking expires}
     BookingStatusHistory:
       type: object
       required: [id, booking_id, to_status, created_at]

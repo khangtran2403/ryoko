@@ -172,6 +172,30 @@ func TestFakeGatewayVerifyWebhook(t *testing.T) {
 	}
 }
 
+func TestFakeGatewayVerifyFailedWebhook(t *testing.T) {
+	t.Parallel()
+	gateway, err := NewFakeGateway("https://app.example.com/payments/fake", fakeWebhookTestSecret)
+	if err != nil {
+		t.Fatalf("NewFakeGateway() error = %v", err)
+	}
+	payload := []byte(`{"id":"event-failed-17","type":"payment.failed","provider_payment_id":"fake-payment-17","failure_code":"card_declined","failure_message":"The test card was declined"}`)
+	event, err := gateway.VerifyWebhook(payload, signFakeWebhook(payload, fakeWebhookTestSecret))
+	if err != nil {
+		t.Fatalf("VerifyWebhook() error = %v", err)
+	}
+	want := WebhookEvent{
+		Provider:          FakeProvider,
+		ProviderEventID:   "event-failed-17",
+		Type:              PaymentFailedEvent,
+		ProviderPaymentID: "fake-payment-17",
+		FailureCode:       "card_declined",
+		FailureMessage:    "The test card was declined",
+	}
+	if event != want {
+		t.Errorf("VerifyWebhook() event = %+v, want %+v", event, want)
+	}
+}
+
 func TestFakeGatewayVerifyWebhookRejectsInvalidInput(t *testing.T) {
 	t.Parallel()
 
@@ -192,6 +216,8 @@ func TestFakeGatewayVerifyWebhookRejectsInvalidInput(t *testing.T) {
 		{name: "malformed JSON", payload: []byte(`{"id":`), signature: signFakeWebhook([]byte(`{"id":`), fakeWebhookTestSecret), wantErr: ErrInvalidWebhookPayload},
 		{name: "unknown field", payload: []byte(`{"id":"event-17","type":"payment.succeeded","provider_payment_id":"fake-payment-17","extra":true}`), wantErr: ErrInvalidWebhookPayload},
 		{name: "missing event ID", payload: []byte(`{"type":"payment.succeeded","provider_payment_id":"fake-payment-17"}`), wantErr: ErrInvalidWebhookPayload},
+		{name: "failed event missing code", payload: []byte(`{"id":"event-17","type":"payment.failed","provider_payment_id":"fake-payment-17"}`), wantErr: ErrInvalidWebhookPayload},
+		{name: "success event with failure", payload: []byte(`{"id":"event-17","type":"payment.succeeded","provider_payment_id":"fake-payment-17","failure_code":"declined"}`), wantErr: ErrInvalidWebhookPayload},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

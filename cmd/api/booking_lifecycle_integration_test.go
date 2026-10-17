@@ -138,6 +138,39 @@ func TestBookingHTTPLifecycleIntegration(t *testing.T) {
 	assertSingleBooking(t, pool)
 	assertHTTPPendingPayment(t, pool, created.ID, 300, "VND")
 	assertSearchReturnsHotel(t, client, searchURL, hotelID, false)
+	paymentStatusURL := server.URL + "/me/bookings/" + strconv.FormatInt(created.ID, 10) + "/payment"
+	failedWebhookPayload, err := json.Marshal(map[string]any{
+		"id":                  "booking-lifecycle-payment-failed",
+		"type":                payments.PaymentFailedEvent,
+		"provider_payment_id": paymentSession.ProviderPaymentID,
+		"failure_code":        "test_card_declined",
+		"failure_message":     "Internal test provider detail",
+	})
+	if err != nil {
+		t.Fatalf("encode failed payment webhook: %v", err)
+	}
+	failedWebhookBody := doPaymentWebhookRequest(t, client, server.URL, failedWebhookPayload, http.StatusOK)
+	var failedWebhookResponse handler.PaymentWebhookResponse
+	decodeAPIResponse(t, failedWebhookBody, &failedWebhookResponse)
+	if !failedWebhookResponse.Processed || !failedWebhookResponse.Retryable {
+		t.Errorf("failed webhook response = %+v, want processed retryable", failedWebhookResponse)
+	}
+	failedStatusBody := doAPIRequest(t, client, http.MethodGet, paymentStatusURL, login.AccessToken, "", nil, http.StatusOK)
+	var failedStatus handler.PaymentStatusResponse
+	decodeAPIResponse(t, failedStatusBody, &failedStatus)
+	if !failedStatus.Retryable || failedStatus.FailureCode == nil || *failedStatus.FailureCode != "payment_failed" || strings.Contains(string(failedStatusBody), "test_card_declined") || strings.Contains(string(failedStatusBody), "Internal test provider detail") {
+		t.Errorf("failed payment status = %+v; body=%s", failedStatus, failedStatusBody)
+	}
+	retrySessionBody := doAPIRequest(
+		t, client, http.MethodPost,
+		server.URL+"/me/bookings/"+strconv.FormatInt(created.ID, 10)+"/payment-session",
+		login.AccessToken, "", nil, http.StatusCreated,
+	)
+	var retrySession handler.PaymentSessionResponse
+	decodeAPIResponse(t, retrySessionBody, &retrySession)
+	if retrySession.PaymentID != paymentSession.PaymentID || retrySession.ProviderPaymentID != paymentSession.ProviderPaymentID {
+		t.Errorf("retry payment session = %+v, want same provider payment", retrySession)
+	}
 	webhookPayload, err := json.Marshal(map[string]any{
 		"id":                  "booking-lifecycle-payment-succeeded",
 		"type":                payments.PaymentSucceededEvent,
@@ -151,6 +184,12 @@ func TestBookingHTTPLifecycleIntegration(t *testing.T) {
 	decodeAPIResponse(t, webhookBody, &webhookResponse)
 	if !webhookResponse.Received || !webhookResponse.Processed {
 		t.Errorf("webhook response = %+v, want received and processed", webhookResponse)
+	}
+	paymentStatusBody := doAPIRequest(t, client, http.MethodGet, paymentStatusURL, login.AccessToken, "", nil, http.StatusOK)
+	var paymentStatus handler.PaymentStatusResponse
+	decodeAPIResponse(t, paymentStatusBody, &paymentStatus)
+	if paymentStatus.PaymentID != paymentSession.PaymentID || paymentStatus.BookingID != created.ID || paymentStatus.Status != "succeeded" || paymentStatus.PaidAt == nil || paymentStatus.RefundedAt != nil || paymentStatus.Retryable || paymentStatus.FailureCode != nil {
+		t.Errorf("payment status = %+v, want succeeded payment for booking %d", paymentStatus, created.ID)
 	}
 
 	bookingURL := server.URL + "/me/bookings/" + strconv.FormatInt(created.ID, 10)
@@ -176,6 +215,11 @@ func TestBookingHTTPLifecycleIntegration(t *testing.T) {
 	decodeAPIResponse(t, cancelBody, &cancelled)
 	if cancelled.ID != created.ID || cancelled.Status != "cancelled" {
 		t.Errorf("cancelled booking = %+v, want cancelled booking %d", cancelled, created.ID)
+	}
+	paymentStatusBody = doAPIRequest(t, client, http.MethodGet, paymentStatusURL, login.AccessToken, "", nil, http.StatusOK)
+	decodeAPIResponse(t, paymentStatusBody, &paymentStatus)
+	if paymentStatus.Status != "refund_pending" || paymentStatus.RefundedAt != nil {
+		t.Errorf("payment status after cancellation = %+v, want refund_pending", paymentStatus)
 	}
 
 	historyBody := doAPIRequest(

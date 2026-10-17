@@ -16,12 +16,28 @@ type fakePaymentQueries struct {
 	mu sync.Mutex
 
 	getInitiatableFn func(context.Context, sqlc.GetInitiatablePaymentForUserParams) (sqlc.Payment, error)
+	getForUserFn     func(context.Context, sqlc.GetPaymentByBookingIDForUserParams) (sqlc.Payment, error)
 	setProviderIDFn  func(context.Context, sqlc.SetPaymentProviderIDParams) (sqlc.Payment, error)
 	getByBookingIDFn func(context.Context, int64) (sqlc.Payment, error)
 
 	getInitiatableCalls []sqlc.GetInitiatablePaymentForUserParams
+	getForUserCalls     []sqlc.GetPaymentByBookingIDForUserParams
 	setProviderIDCalls  []sqlc.SetPaymentProviderIDParams
 	getByBookingIDCalls []int64
+}
+
+func (q *fakePaymentQueries) GetPaymentByBookingIDForUser(
+	ctx context.Context,
+	arg sqlc.GetPaymentByBookingIDForUserParams,
+) (sqlc.Payment, error) {
+	q.mu.Lock()
+	q.getForUserCalls = append(q.getForUserCalls, arg)
+	fn := q.getForUserFn
+	q.mu.Unlock()
+	if fn == nil {
+		panic("unexpected GetPaymentByBookingIDForUser call")
+	}
+	return fn(ctx, arg)
 }
 
 var _ paymentQueries = (*fakePaymentQueries)(nil)
@@ -122,6 +138,62 @@ func TestNewServiceRejectsInvalidDependencies(t *testing.T) {
 			}()
 
 			NewService(test.queries, test.gateway)
+		})
+	}
+}
+
+func TestGetPaymentStatusReturnsOwnedPayment(t *testing.T) {
+	want := testPayment()
+	queries := &fakePaymentQueries{
+		getForUserFn: func(_ context.Context, arg sqlc.GetPaymentByBookingIDForUserParams) (sqlc.Payment, error) {
+			if arg.UserID != 42 || arg.BookingID != want.BookingID {
+				t.Errorf("query args = %+v, want user 42 booking %d", arg, want.BookingID)
+			}
+			return want, nil
+		},
+	}
+	service := NewService(queries, &recordingGateway{provider: FakeProvider})
+	got, err := service.GetPaymentStatus(context.Background(), 42, want.BookingID)
+	if err != nil {
+		t.Fatalf("GetPaymentStatus() error = %v", err)
+	}
+	if got != want {
+		t.Errorf("GetPaymentStatus() = %+v, want %+v", got, want)
+	}
+}
+
+func TestGetPaymentStatusValidatesAndHidesOwnership(t *testing.T) {
+	tests := []struct {
+		name      string
+		userID    int64
+		bookingID int64
+		queryErr  error
+		wantErr   error
+		wantQuery bool
+	}{
+		{name: "invalid booking", userID: 42, bookingID: 0, wantErr: ErrInvalidBookingID},
+		{name: "invalid user", userID: 0, bookingID: 29, wantErr: ErrInvalidUserID},
+		{name: "missing or not owned", userID: 42, bookingID: 29, queryErr: pgx.ErrNoRows, wantErr: ErrPaymentNotFound, wantQuery: true},
+		{name: "database failure", userID: 42, bookingID: 29, queryErr: errors.New("database failed"), wantQuery: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			queries := &fakePaymentQueries{
+				getForUserFn: func(context.Context, sqlc.GetPaymentByBookingIDForUserParams) (sqlc.Payment, error) {
+					return sqlc.Payment{}, tt.queryErr
+				},
+			}
+			service := NewService(queries, &recordingGateway{provider: FakeProvider})
+			_, err := service.GetPaymentStatus(context.Background(), tt.userID, tt.bookingID)
+			if tt.wantErr != nil && !errors.Is(err, tt.wantErr) {
+				t.Fatalf("GetPaymentStatus() error = %v, want %v", err, tt.wantErr)
+			}
+			if tt.wantErr == nil && err == nil {
+				t.Fatal("GetPaymentStatus() error = nil, want database error")
+			}
+			if got := len(queries.getForUserCalls); (got == 1) != tt.wantQuery {
+				t.Errorf("query calls = %d, wantQuery=%t", got, tt.wantQuery)
+			}
 		})
 	}
 }

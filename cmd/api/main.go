@@ -188,6 +188,16 @@ func main() {
 		cfg.Payment.ExpirationInterval,
 		log.Default(),
 	)
+	paymentRefundService := payments.NewRefundService(
+		queries,
+		paymentGateway,
+		cfg.Payment.RefundBatchSize,
+	)
+	paymentRefundWorker := payments.NewRefundWorker(
+		paymentRefundService,
+		cfg.Payment.RefundInterval,
+		log.Default(),
+	)
 	bookingService := booking.NewService(pool, queries, booking.PaymentSettings{
 		Provider:   cfg.Payment.Provider,
 		PendingTTL: cfg.Payment.PendingTTL,
@@ -243,7 +253,7 @@ func main() {
 
 	var workerWG sync.WaitGroup
 
-	workerWG.Add(5)
+	workerWG.Add(6)
 	go func() {
 		defer workerWG.Done()
 		completionWorker.Run(appCtx)
@@ -263,6 +273,10 @@ func main() {
 	go func() {
 		defer workerWG.Done()
 		paymentExpirationWorker.Run(appCtx)
+	}()
+	go func() {
+		defer workerWG.Done()
+		paymentRefundWorker.Run(appCtx)
 	}()
 
 	serverErrors := make(chan error, 1)

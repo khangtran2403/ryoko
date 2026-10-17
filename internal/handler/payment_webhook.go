@@ -42,6 +42,8 @@ type PaymentWebhookResponse struct {
 	Duplicate        bool `json:"duplicate"`
 	Ignored          bool `json:"ignored"`
 	AlreadyProcessed bool `json:"already_processed"`
+	RefundQueued     bool `json:"refund_queued"`
+	Retryable        bool `json:"retryable"`
 }
 
 func (h *PaymentWebhookHandler) Handle(w http.ResponseWriter, r *http.Request) {
@@ -104,5 +106,7 @@ func (h *PaymentWebhookHandler) Handle(w http.ResponseWriter, r *http.Request) {
 		Duplicate:        result.Duplicate,
 		Ignored:          result.Ignored,
 		AlreadyProcessed: result.AlreadyProcessed,
+		RefundQueued:     result.RefundQueued,
+		Retryable:        result.Retryable,
 	})
 }

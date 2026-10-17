@@ -76,6 +76,115 @@ func TestWebhookServiceRecordsIgnoredEvent(t *testing.T) {
 	assertPaymentWebhookState(t, pool, bookingID, paymentID, "pending_payment", "pending", 0, 1)
 }
 
+func TestWebhookServiceRecordsRetryableFailureThenAcceptsSuccess(t *testing.T) {
+	pool := newPaymentWebhookIntegrationPool(t)
+	service := NewWebhookService(pool, sqlc.New(pool))
+	bookingID, paymentID, providerPaymentID := insertPaymentWebhookFixture(t, pool, 15*time.Minute)
+
+	failureEvent := WebhookEvent{
+		Provider:          FakeProvider,
+		ProviderEventID:   "evt-payment-failed",
+		Type:              PaymentFailedEvent,
+		ProviderPaymentID: providerPaymentID,
+		FailureCode:       "card_declined",
+		FailureMessage:    "Provider diagnostic for internal use",
+	}
+	result, err := service.ProcessWebhook(context.Background(), failureEvent)
+	if err != nil {
+		t.Fatalf("failed ProcessWebhook() error = %v", err)
+	}
+	if !result.Processed || !result.Retryable {
+		t.Fatalf("failed ProcessWebhook() result = %+v, want processed retryable", result)
+	}
+	assertPaymentWebhookState(t, pool, bookingID, paymentID, "pending_payment", "pending", 0, 1)
+	var failureCode, failureMessage string
+	if err := pool.QueryRow(context.Background(), "SELECT failure_code, failure_message FROM payments WHERE id = $1", paymentID).Scan(&failureCode, &failureMessage); err != nil {
+		t.Fatalf("read payment failure: %v", err)
+	}
+	if failureCode != "card_declined" || failureMessage != "Provider diagnostic for internal use" {
+		t.Errorf("stored failure = {%q %q}", failureCode, failureMessage)
+	}
+
+	successEvent := WebhookEvent{
+		Provider:          FakeProvider,
+		ProviderEventID:   "evt-success-after-failure",
+		Type:              PaymentSucceededEvent,
+		ProviderPaymentID: providerPaymentID,
+	}
+	result, err = service.ProcessWebhook(context.Background(), successEvent)
+	if err != nil || !result.Processed || result.Retryable {
+		t.Fatalf("successful retry result = %+v error = %v", result, err)
+	}
+	assertPaymentWebhookState(t, pool, bookingID, paymentID, "confirmed", "succeeded", 1, 2)
+	var failureCleared bool
+	if err := pool.QueryRow(context.Background(), "SELECT failure_code IS NULL AND failure_message IS NULL FROM payments WHERE id = $1", paymentID).Scan(&failureCleared); err != nil {
+		t.Fatalf("read cleared payment failure: %v", err)
+	}
+	if !failureCleared {
+		t.Error("successful retry did not clear payment failure")
+	}
+
+	failureEvent.ProviderEventID = "evt-stale-failure"
+	result, err = service.ProcessWebhook(context.Background(), failureEvent)
+	if err != nil || !result.AlreadyProcessed {
+		t.Fatalf("stale failure result = %+v error = %v", result, err)
+	}
+	assertPaymentWebhookState(t, pool, bookingID, paymentID, "confirmed", "succeeded", 1, 3)
+}
+
+func TestWebhookServiceQueuesRefundForLatePaymentSuccess(t *testing.T) {
+	pool := newPaymentWebhookIntegrationPool(t)
+	queries := sqlc.New(pool)
+	webhookService := NewWebhookService(pool, queries)
+	expirationService := NewExpirationService(pool, queries, 100)
+	bookingID, paymentID, providerPaymentID := insertPaymentWebhookFixture(t, pool, -time.Minute)
+	insertReservedAvailability(t, pool, bookingID)
+
+	if expired, err := expirationService.ExpirePendingPayments(context.Background()); err != nil || expired != 1 {
+		t.Fatalf("ExpirePendingPayments() = (%d, %v), want (1, nil)", expired, err)
+	}
+	assertPaymentWebhookState(t, pool, bookingID, paymentID, "cancelled", "expired", 1, 0)
+
+	event := WebhookEvent{
+		Provider:          FakeProvider,
+		ProviderEventID:   "evt-late-success",
+		Type:              PaymentSucceededEvent,
+		ProviderPaymentID: providerPaymentID,
+	}
+	result, err := webhookService.ProcessWebhook(context.Background(), event)
+	if err != nil {
+		t.Fatalf("ProcessWebhook() error = %v", err)
+	}
+	if !result.Processed || !result.RefundQueued || result.AlreadyProcessed {
+		t.Fatalf("ProcessWebhook() result = %+v, want processed refund queued", result)
+	}
+	assertPaymentWebhookState(t, pool, bookingID, paymentID, "cancelled", "refund_pending", 1, 1)
+	var paidAtPresent bool
+	if err := pool.QueryRow(context.Background(), "SELECT paid_at IS NOT NULL FROM payments WHERE id = $1", paymentID).Scan(&paidAtPresent); err != nil {
+		t.Fatalf("read late payment paid_at: %v", err)
+	}
+	if !paidAtPresent {
+		t.Error("late successful payment has no paid_at timestamp")
+	}
+
+	event.ProviderEventID = "evt-late-success-repeat"
+	result, err = webhookService.ProcessWebhook(context.Background(), event)
+	if err != nil || !result.AlreadyProcessed {
+		t.Fatalf("refund-pending repeated success result = %+v error = %v", result, err)
+	}
+	assertPaymentWebhookState(t, pool, bookingID, paymentID, "cancelled", "refund_pending", 1, 2)
+
+	if _, err := queries.MarkPaymentRefunded(context.Background(), paymentID); err != nil {
+		t.Fatalf("mark payment refunded: %v", err)
+	}
+	event.ProviderEventID = "evt-after-refund"
+	result, err = webhookService.ProcessWebhook(context.Background(), event)
+	if err != nil || !result.AlreadyProcessed {
+		t.Fatalf("refunded repeated success result = %+v error = %v", result, err)
+	}
+	assertPaymentWebhookState(t, pool, bookingID, paymentID, "cancelled", "refunded", 1, 3)
+}
+
 func TestWebhookServiceRollsBackUnprocessableEvents(t *testing.T) {
 	pool := newPaymentWebhookIntegrationPool(t)
 	service := NewWebhookService(pool, sqlc.New(pool))

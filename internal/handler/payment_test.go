@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/khangtran2403/ryoko/internal/auth"
 	"github.com/khangtran2403/ryoko/internal/db/sqlc"
 	"github.com/khangtran2403/ryoko/internal/middleware"
@@ -17,12 +18,25 @@ import (
 )
 
 type fakePaymentService struct {
-	result payments.InitiatePaymentResult
-	err    error
+	result       payments.InitiatePaymentResult
+	err          error
+	statusResult sqlc.Payment
+	statusErr    error
 
 	called    bool
 	userID    int64
 	bookingID int64
+}
+
+func (f *fakePaymentService) GetPaymentStatus(
+	_ context.Context,
+	userID int64,
+	bookingID int64,
+) (sqlc.Payment, error) {
+	f.called = true
+	f.userID = userID
+	f.bookingID = bookingID
+	return f.statusResult, f.statusErr
 }
 
 func (f *fakePaymentService) InitiatePayment(
@@ -74,6 +88,103 @@ func TestPaymentHandlerInitiatePaymentReturnsCheckoutURL(t *testing.T) {
 	}
 	if strings.Contains(response.Body.String(), "client_secret") {
 		t.Errorf("response contains empty client_secret: %s", response.Body.String())
+	}
+}
+
+func TestPaymentHandlerGetPaymentStatus(t *testing.T) {
+	paidAt := time.Date(2026, time.October, 17, 4, 5, 6, 0, time.FixedZone("test", 7*60*60))
+	service := &fakePaymentService{statusResult: sqlc.Payment{
+		ID:                7,
+		BookingID:         88,
+		Provider:          "fake",
+		ProviderPaymentID: pgtype.Text{String: "secret-provider-id", Valid: true},
+		AmountMinor:       250000,
+		Currency:          "VND",
+		Status:            "succeeded",
+		FailureMessage:    pgtype.Text{String: "internal provider detail", Valid: true},
+		PaidAt:            pgtype.Timestamptz{Time: paidAt, Valid: true},
+	}}
+	mux, token := newAuthenticatedPaymentMux(t, service, 42)
+	response := performPaymentMethodRequest(mux, http.MethodGet, token, "/me/bookings/88/payment")
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body = %q", response.Code, response.Body.String())
+	}
+	if !service.called || service.userID != 42 || service.bookingID != 88 {
+		t.Errorf("service call = {called:%t user:%d booking:%d}", service.called, service.userID, service.bookingID)
+	}
+	var body PaymentStatusResponse
+	if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if body.PaymentID != 7 || body.BookingID != 88 || body.AmountMinor != 250000 || body.Currency != "VND" || body.Status != "succeeded" {
+		t.Errorf("response = %+v", body)
+	}
+	if body.PaidAt == nil || !body.PaidAt.Equal(paidAt) || body.PaidAt.Location() != time.UTC || body.RefundedAt != nil {
+		t.Errorf("payment timestamps = paid %v refunded %v", body.PaidAt, body.RefundedAt)
+	}
+	if body.Retryable || body.FailureCode != nil {
+		t.Errorf("successful payment retry state = {retryable:%t code:%v}, want false/nil", body.Retryable, body.FailureCode)
+	}
+	for _, privateField := range []string{"provider_payment_id", "secret-provider-id", "failure_message", "internal provider detail"} {
+		if strings.Contains(response.Body.String(), privateField) {
+			t.Errorf("response exposes private field %q: %s", privateField, response.Body.String())
+		}
+	}
+}
+
+func TestPaymentHandlerGetPaymentStatusSanitizesRetryableFailure(t *testing.T) {
+	service := &fakePaymentService{statusResult: sqlc.Payment{
+		ID:             7,
+		BookingID:      88,
+		AmountMinor:    250000,
+		Currency:       "VND",
+		Status:         "pending",
+		FailureCode:    pgtype.Text{String: "card_declined_provider_code", Valid: true},
+		FailureMessage: pgtype.Text{String: "sensitive provider diagnostic", Valid: true},
+	}}
+	mux, token := newAuthenticatedPaymentMux(t, service, 42)
+	response := performPaymentMethodRequest(mux, http.MethodGet, token, "/me/bookings/88/payment")
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", response.Code)
+	}
+	var body PaymentStatusResponse
+	if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if !body.Retryable || body.FailureCode == nil || *body.FailureCode != "payment_failed" {
+		t.Errorf("retry state = {retryable:%t code:%v}, want true/payment_failed", body.Retryable, body.FailureCode)
+	}
+	for _, privateValue := range []string{"card_declined_provider_code", "sensitive provider diagnostic"} {
+		if strings.Contains(response.Body.String(), privateValue) {
+			t.Errorf("response exposes provider value %q: %s", privateValue, response.Body.String())
+		}
+	}
+}
+
+func TestPaymentHandlerGetPaymentStatusMapsErrors(t *testing.T) {
+	tests := []struct {
+		name       string
+		bookingID  string
+		err        error
+		wantStatus int
+	}{
+		{name: "invalid path", bookingID: "abc", wantStatus: http.StatusBadRequest},
+		{name: "not found or not owned", bookingID: "88", err: payments.ErrPaymentNotFound, wantStatus: http.StatusNotFound},
+		{name: "invalid user", bookingID: "88", err: payments.ErrInvalidUserID, wantStatus: http.StatusUnauthorized},
+		{name: "database failure", bookingID: "88", err: errors.New("database failed"), wantStatus: http.StatusInternalServerError},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			service := &fakePaymentService{statusErr: tt.err}
+			mux, token := newAuthenticatedPaymentMux(t, service, 42)
+			response := performPaymentMethodRequest(mux, http.MethodGet, token, "/me/bookings/"+tt.bookingID+"/payment")
+			if response.Code != tt.wantStatus {
+				t.Fatalf("status = %d, want %d; body = %q", response.Code, tt.wantStatus, response.Body.String())
+			}
+			if tt.bookingID == "abc" && service.called {
+				t.Fatal("service called for invalid booking ID")
+			}
+		})
 	}
 }
 
@@ -221,11 +332,19 @@ func newAuthenticatedPaymentMux(
 		"POST /me/bookings/{bookingID}/payment-session",
 		authMiddleware.Authenticate(http.HandlerFunc(paymentHandler.InitiatePayment)),
 	)
+	mux.Handle(
+		"GET /me/bookings/{bookingID}/payment",
+		authMiddleware.Authenticate(http.HandlerFunc(paymentHandler.GetPaymentStatus)),
+	)
 	return mux, token
 }
 
 func performPaymentRequest(handler http.Handler, token string, path string) *httptest.ResponseRecorder {
-	request := httptest.NewRequest(http.MethodPost, path, nil)
+	return performPaymentMethodRequest(handler, http.MethodPost, token, path)
+}
+
+func performPaymentMethodRequest(handler http.Handler, method string, token string, path string) *httptest.ResponseRecorder {
+	request := httptest.NewRequest(method, path, nil)
 	if token != "" {
 		request.Header.Set("Authorization", "Bearer "+token)
 	}

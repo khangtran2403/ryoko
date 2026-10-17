@@ -315,6 +315,54 @@ func (q *Queries) GetPaymentByBookingIDForUser(ctx context.Context, arg GetPayme
 	return i, err
 }
 
+const getPaymentByProviderID = `-- name: GetPaymentByProviderID :one
+SELECT
+    id,
+    booking_id,
+    provider,
+    provider_payment_id,
+    provider_idempotency_key,
+    amount_minor,
+    currency,
+    status,
+    failure_code,
+    failure_message,
+    paid_at,
+    refunded_at,
+    created_at,
+    updated_at
+FROM payments
+WHERE provider = $1
+  AND provider_payment_id = $2
+`
+
+type GetPaymentByProviderIDParams struct {
+	Provider          string      `json:"provider"`
+	ProviderPaymentID pgtype.Text `json:"provider_payment_id"`
+}
+
+func (q *Queries) GetPaymentByProviderID(ctx context.Context, arg GetPaymentByProviderIDParams) (Payment, error) {
+	row := q.db.QueryRow(ctx, getPaymentByProviderID, arg.Provider, arg.ProviderPaymentID)
+	var i Payment
+	err := row.Scan(
+		&i.ID,
+		&i.BookingID,
+		&i.Provider,
+		&i.ProviderPaymentID,
+		&i.ProviderIdempotencyKey,
+		&i.AmountMinor,
+		&i.Currency,
+		&i.Status,
+		&i.FailureCode,
+		&i.FailureMessage,
+		&i.PaidAt,
+		&i.RefundedAt,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
 const getPaymentByProviderIDForUpdate = `-- name: GetPaymentByProviderIDForUpdate :one
 SELECT
     id,
@@ -344,6 +392,112 @@ type GetPaymentByProviderIDForUpdateParams struct {
 
 func (q *Queries) GetPaymentByProviderIDForUpdate(ctx context.Context, arg GetPaymentByProviderIDForUpdateParams) (Payment, error) {
 	row := q.db.QueryRow(ctx, getPaymentByProviderIDForUpdate, arg.Provider, arg.ProviderPaymentID)
+	var i Payment
+	err := row.Scan(
+		&i.ID,
+		&i.BookingID,
+		&i.Provider,
+		&i.ProviderPaymentID,
+		&i.ProviderIdempotencyKey,
+		&i.AmountMinor,
+		&i.Currency,
+		&i.Status,
+		&i.FailureCode,
+		&i.FailureMessage,
+		&i.PaidAt,
+		&i.RefundedAt,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const listRefundPendingPayments = `-- name: ListRefundPendingPayments :many
+SELECT
+    id,
+    booking_id,
+    provider,
+    provider_payment_id,
+    provider_idempotency_key,
+    amount_minor,
+    currency,
+    status,
+    failure_code,
+    failure_message,
+    paid_at,
+    refunded_at,
+    created_at,
+    updated_at
+FROM payments
+WHERE status = 'refund_pending'
+ORDER BY updated_at, id
+LIMIT $1::int
+`
+
+func (q *Queries) ListRefundPendingPayments(ctx context.Context, batchSize int32) ([]Payment, error) {
+	rows, err := q.db.Query(ctx, listRefundPendingPayments, batchSize)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []Payment
+	for rows.Next() {
+		var i Payment
+		if err := rows.Scan(
+			&i.ID,
+			&i.BookingID,
+			&i.Provider,
+			&i.ProviderPaymentID,
+			&i.ProviderIdempotencyKey,
+			&i.AmountMinor,
+			&i.Currency,
+			&i.Status,
+			&i.FailureCode,
+			&i.FailureMessage,
+			&i.PaidAt,
+			&i.RefundedAt,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const markExpiredPaymentRefundPending = `-- name: MarkExpiredPaymentRefundPending :one
+UPDATE payments
+SET
+    status = 'refund_pending',
+    failure_code = NULL,
+    failure_message = NULL,
+    paid_at = COALESCE(paid_at, now()),
+    updated_at = now()
+WHERE id = $1
+  AND status = 'expired'
+RETURNING
+    id,
+    booking_id,
+    provider,
+    provider_payment_id,
+    provider_idempotency_key,
+    amount_minor,
+    currency,
+    status,
+    failure_code,
+    failure_message,
+    paid_at,
+    refunded_at,
+    created_at,
+    updated_at
+`
+
+func (q *Queries) MarkExpiredPaymentRefundPending(ctx context.Context, paymentID int64) (Payment, error) {
+	row := q.db.QueryRow(ctx, markExpiredPaymentRefundPending, paymentID)
 	var i Payment
 	err := row.Scan(
 		&i.ID,
@@ -460,6 +614,8 @@ const markPaymentRefunded = `-- name: MarkPaymentRefunded :one
 UPDATE payments
 SET
     status = 'refunded',
+    failure_code = NULL,
+    failure_message = NULL,
     refunded_at = now(),
     updated_at = now()
 WHERE id = $1
@@ -603,6 +759,26 @@ func (q *Queries) RecordPaymentFailure(ctx context.Context, arg RecordPaymentFai
 		&i.UpdatedAt,
 	)
 	return i, err
+}
+
+const recordPaymentRefundFailure = `-- name: RecordPaymentRefundFailure :exec
+UPDATE payments
+SET
+    failure_code = 'refund_provider_error',
+    failure_message = $1,
+    updated_at = now()
+WHERE id = $2
+  AND status = 'refund_pending'
+`
+
+type RecordPaymentRefundFailureParams struct {
+	FailureMessage pgtype.Text `json:"failure_message"`
+	PaymentID      int64       `json:"payment_id"`
+}
+
+func (q *Queries) RecordPaymentRefundFailure(ctx context.Context, arg RecordPaymentRefundFailureParams) error {
+	_, err := q.db.Exec(ctx, recordPaymentRefundFailure, arg.FailureMessage, arg.PaymentID)
+	return err
 }
 
 const setPaymentProviderID = `-- name: SetPaymentProviderID :one

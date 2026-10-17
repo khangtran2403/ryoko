@@ -262,10 +262,68 @@ RETURNING
     created_at,
     updated_at;
 
+-- name: MarkExpiredPaymentRefundPending :one
+UPDATE payments
+SET
+    status = 'refund_pending',
+    failure_code = NULL,
+    failure_message = NULL,
+    paid_at = COALESCE(paid_at, now()),
+    updated_at = now()
+WHERE id = sqlc.arg(payment_id)
+  AND status = 'expired'
+RETURNING
+    id,
+    booking_id,
+    provider,
+    provider_payment_id,
+    provider_idempotency_key,
+    amount_minor,
+    currency,
+    status,
+    failure_code,
+    failure_message,
+    paid_at,
+    refunded_at,
+    created_at,
+    updated_at;
+
+-- name: ListRefundPendingPayments :many
+SELECT
+    id,
+    booking_id,
+    provider,
+    provider_payment_id,
+    provider_idempotency_key,
+    amount_minor,
+    currency,
+    status,
+    failure_code,
+    failure_message,
+    paid_at,
+    refunded_at,
+    created_at,
+    updated_at
+FROM payments
+WHERE status = 'refund_pending'
+ORDER BY updated_at, id
+LIMIT sqlc.arg(batch_size)::int;
+
+-- name: RecordPaymentRefundFailure :exec
+UPDATE payments
+SET
+    failure_code = 'refund_provider_error',
+    failure_message = sqlc.arg(failure_message),
+    updated_at = now()
+WHERE id = sqlc.arg(payment_id)
+  AND status = 'refund_pending';
+
 -- name: MarkPaymentRefunded :one
 UPDATE payments
 SET
     status = 'refunded',
+    failure_code = NULL,
+    failure_message = NULL,
     refunded_at = now(),
     updated_at = now()
 WHERE id = sqlc.arg(payment_id)

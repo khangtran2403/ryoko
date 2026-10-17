@@ -72,7 +72,7 @@ func TestPaymentWebhookHandlerProcessesVerifiedEvent(t *testing.T) {
 	if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
 		t.Fatalf("decode response: %v", err)
 	}
-	if !body.Received || !body.Processed || body.Duplicate || body.Ignored || body.AlreadyProcessed {
+	if !body.Received || !body.Processed || body.Duplicate || body.Ignored || body.AlreadyProcessed || body.RefundQueued || body.Retryable {
 		t.Errorf("response = %+v, want received and processed", body)
 	}
 }
@@ -86,6 +86,8 @@ func TestPaymentWebhookHandlerReturnsIdempotentDispositions(t *testing.T) {
 		{name: "duplicate", result: payments.WebhookResult{Duplicate: true}, check: func(r PaymentWebhookResponse) bool { return r.Duplicate }},
 		{name: "ignored", result: payments.WebhookResult{Ignored: true}, check: func(r PaymentWebhookResponse) bool { return r.Ignored }},
 		{name: "already processed", result: payments.WebhookResult{AlreadyProcessed: true}, check: func(r PaymentWebhookResponse) bool { return r.AlreadyProcessed }},
+		{name: "refund queued", result: payments.WebhookResult{Processed: true, RefundQueued: true}, check: func(r PaymentWebhookResponse) bool { return r.Processed && r.RefundQueued }},
+		{name: "retryable failure", result: payments.WebhookResult{Processed: true, Retryable: true}, check: func(r PaymentWebhookResponse) bool { return r.Processed && r.Retryable }},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

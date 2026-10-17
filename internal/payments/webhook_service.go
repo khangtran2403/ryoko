@@ -25,6 +25,8 @@ type WebhookResult struct {
 	Duplicate        bool
 	Ignored          bool
 	AlreadyProcessed bool
+	RefundQueued     bool
+	Retryable        bool
 }
 
 type WebhookService struct {
@@ -50,10 +52,19 @@ func (s *WebhookService) ProcessWebhook(
 	event.ProviderEventID = strings.TrimSpace(event.ProviderEventID)
 	event.Type = strings.TrimSpace(event.Type)
 	event.ProviderPaymentID = strings.TrimSpace(event.ProviderPaymentID)
+	event.FailureCode = strings.TrimSpace(event.FailureCode)
+	event.FailureMessage = strings.TrimSpace(event.FailureMessage)
 	if event.Provider == "" ||
 		event.ProviderEventID == "" ||
 		event.Type == "" ||
 		event.ProviderPaymentID == "" {
+		return WebhookResult{}, ErrInvalidWebhookEvent
+	}
+	if event.Type == PaymentFailedEvent &&
+		(event.FailureCode == "" || len(event.FailureCode) > 100 || len(event.FailureMessage) > 1000) {
+		return WebhookResult{}, ErrInvalidWebhookEvent
+	}
+	if event.Type == PaymentSucceededEvent && (event.FailureCode != "" || event.FailureMessage != "") {
 		return WebhookResult{}, ErrInvalidWebhookEvent
 	}
 
@@ -76,7 +87,7 @@ func (s *WebhookService) ProcessWebhook(
 		return WebhookResult{}, fmt.Errorf("claim payment webhook event: %w", err)
 	}
 
-	if event.Type != PaymentSucceededEvent {
+	if event.Type != PaymentSucceededEvent && event.Type != PaymentFailedEvent {
 		if err := tx.Commit(ctx); err != nil {
 			return WebhookResult{}, fmt.Errorf("commit ignored payment webhook: %w", err)
 		}
@@ -102,7 +113,8 @@ func (s *WebhookService) ProcessWebhook(
 
 	// All booking/payment transitions lock in this order. Keeping one order
 	// prevents a success webhook and the expiration worker from deadlocking.
-	if _, err := qtx.GetBookingForAdminCancellation(ctx, paymentCandidate.BookingID); err != nil {
+	lockedBooking, err := qtx.GetBookingForAdminCancellation(ctx, paymentCandidate.BookingID)
+	if err != nil {
 		return WebhookResult{}, fmt.Errorf("lock webhook booking: %w", err)
 	}
 	payment, err := qtx.GetPaymentByBookingIDForUpdate(ctx, paymentCandidate.BookingID)
@@ -120,11 +132,53 @@ func (s *WebhookService) ProcessWebhook(
 		PaymentID: payment.ID,
 		BookingID: payment.BookingID,
 	}
-	if payment.Status == "succeeded" {
+	if event.Type == PaymentFailedEvent {
+		if payment.Status != "pending" {
+			if err := tx.Commit(ctx); err != nil {
+				return WebhookResult{}, fmt.Errorf("commit stale payment failure: %w", err)
+			}
+			result.AlreadyProcessed = true
+			return result, nil
+		}
+		_, err := qtx.RecordPaymentFailure(ctx, sqlc.RecordPaymentFailureParams{
+			FailureCode:    pgtype.Text{String: event.FailureCode, Valid: true},
+			FailureMessage: nullableWebhookText(event.FailureMessage),
+			PaymentID:      payment.ID,
+		})
+		if errors.Is(err, pgx.ErrNoRows) {
+			return WebhookResult{}, ErrWebhookPaymentNotProcessable
+		}
+		if err != nil {
+			return WebhookResult{}, fmt.Errorf("record payment failure: %w", err)
+		}
+		if err := tx.Commit(ctx); err != nil {
+			return WebhookResult{}, fmt.Errorf("commit payment failure: %w", err)
+		}
+		result.Processed = true
+		result.Retryable = true
+		return result, nil
+	}
+	if payment.Status == "succeeded" || payment.Status == "refund_pending" || payment.Status == "refunded" {
 		if err := tx.Commit(ctx); err != nil {
 			return WebhookResult{}, fmt.Errorf("commit repeated payment success: %w", err)
 		}
 		result.AlreadyProcessed = true
+		return result, nil
+	}
+	if payment.Status == "expired" {
+		if lockedBooking.Status != "cancelled" {
+			return WebhookResult{}, ErrWebhookPaymentNotProcessable
+		}
+		if _, err := qtx.MarkExpiredPaymentRefundPending(ctx, payment.ID); errors.Is(err, pgx.ErrNoRows) {
+			return WebhookResult{}, ErrWebhookPaymentNotProcessable
+		} else if err != nil {
+			return WebhookResult{}, fmt.Errorf("queue late payment refund: %w", err)
+		}
+		if err := tx.Commit(ctx); err != nil {
+			return WebhookResult{}, fmt.Errorf("commit late payment refund: %w", err)
+		}
+		result.Processed = true
+		result.RefundQueued = true
 		return result, nil
 	}
 	if payment.Status != "pending" {
@@ -160,4 +214,8 @@ func (s *WebhookService) ProcessWebhook(
 	}
 	result.Processed = true
 	return result, nil
+}
+
+func nullableWebhookText(value string) pgtype.Text {
+	return pgtype.Text{String: value, Valid: value != ""}
 }

@@ -78,6 +78,7 @@ func newAPIHandler(deps apiDependencies) http.Handler {
 	mux.Handle("POST /room-types/{roomTypeID}/bookings", deps.authMiddleware.Authenticate(http.HandlerFunc(deps.bookingHandler.CreateBooking)))
 	mux.Handle("POST /me/bookings/{bookingID}/cancel", deps.authMiddleware.Authenticate(http.HandlerFunc(deps.bookingHandler.CancelBooking)))
 	mux.Handle("POST /me/bookings/{bookingID}/payment-session", deps.authMiddleware.Authenticate(http.HandlerFunc(deps.paymentHandler.InitiatePayment)))
+	mux.Handle("GET /me/bookings/{bookingID}/payment", deps.authMiddleware.Authenticate(http.HandlerFunc(deps.paymentHandler.GetPaymentStatus)))
 	mux.HandleFunc("POST /payments/webhooks/fake", deps.paymentWebhookHandler.Handle)
 	mux.Handle("POST /me/bookings/{bookingID}/review", deps.authMiddleware.Authenticate(http.HandlerFunc(deps.reviewHandler.CreateReview)))
 	mux.Handle("PUT /me/reviews/{reviewID}", deps.authMiddleware.Authenticate(http.HandlerFunc(deps.reviewHandler.UpdateReviewByUser)))

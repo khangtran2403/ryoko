@@ -74,6 +74,8 @@ type PaymentConfig struct {
 	PendingTTL          time.Duration
 	ExpirationInterval  time.Duration
 	ExpirationBatchSize int32
+	RefundInterval      time.Duration
+	RefundBatchSize     int32
 	FakeCheckoutBaseURL string
 	FakeWebhookSecret   string
 }
@@ -243,6 +245,14 @@ func Load() (*Config, error) {
 	if err != nil || paymentExpirationBatchSize < 1 || paymentExpirationBatchSize > 1000 {
 		return nil, fmt.Errorf("invalid PAYMENT_EXPIRATION_BATCH_SIZE: must be an integer from 1 to 1000")
 	}
+	paymentRefundInterval, err := getEnvDuration("PAYMENT_REFUND_INTERVAL_SECONDS", 30, "s")
+	if err != nil {
+		return nil, fmt.Errorf("invalid PAYMENT_REFUND_INTERVAL_SECONDS: %w", err)
+	}
+	paymentRefundBatchSize, err := getEnvInt("PAYMENT_REFUND_BATCH_SIZE", 100)
+	if err != nil || paymentRefundBatchSize < 1 || paymentRefundBatchSize > 1000 {
+		return nil, fmt.Errorf("invalid PAYMENT_REFUND_BATCH_SIZE: must be an integer from 1 to 1000")
+	}
 	paymentFakeCheckoutBaseURL := strings.TrimSpace(getEnv(
 		"PAYMENT_FAKE_CHECKOUT_BASE_URL",
 		"http://localhost:3000/payments/fake",
@@ -369,6 +379,8 @@ func Load() (*Config, error) {
 			PendingTTL:          paymentPendingTTL,
 			ExpirationInterval:  paymentExpirationInterval,
 			ExpirationBatchSize: int32(paymentExpirationBatchSize),
+			RefundInterval:      paymentRefundInterval,
+			RefundBatchSize:     int32(paymentRefundBatchSize),
 			FakeCheckoutBaseURL: paymentFakeCheckoutBaseURL,
 			FakeWebhookSecret:   paymentFakeWebhookSecret,
 		},

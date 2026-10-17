@@ -15,7 +15,10 @@ var (
 	ErrInvalidWebhookSignature = errors.New("invalid payment webhook signature")
 )
 
-const PaymentSucceededEvent = "payment.succeeded"
+const (
+	PaymentSucceededEvent = "payment.succeeded"
+	PaymentFailedEvent    = "payment.failed"
+)
 
 type CreatePaymentRequest struct {
 	PaymentID      int64
@@ -44,6 +47,8 @@ type WebhookEvent struct {
 	ProviderEventID   string
 	Type              string
 	ProviderPaymentID string
+	FailureCode       string
+	FailureMessage    string
 }
 
 type Gateway interface {
