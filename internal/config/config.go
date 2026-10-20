@@ -78,6 +78,8 @@ type PaymentConfig struct {
 	RefundBatchSize     int32
 	FakeCheckoutBaseURL string
 	FakeWebhookSecret   string
+	StripeSecretKey     string
+	StripeWebhookSecret string
 }
 
 var cfg *Config
@@ -273,6 +275,16 @@ func Load() (*Config, error) {
 			return nil, fmt.Errorf("PAYMENT_FAKE_WEBHOOK_SECRET must contain at least 32 bytes")
 		}
 	}
+	paymentStripeSecretKey := strings.TrimSpace(getEnv("STRIPE_SECRET_KEY", ""))
+	paymentStripeWebhookSecret := strings.TrimSpace(getEnv("STRIPE_WEBHOOK_SECRET", ""))
+	if paymentProvider == "stripe" {
+		if paymentStripeSecretKey == "" {
+			return nil, fmt.Errorf("STRIPE_SECRET_KEY is required when PAYMENT_PROVIDER=stripe")
+		}
+		if paymentStripeWebhookSecret == "" {
+			return nil, fmt.Errorf("STRIPE_WEBHOOK_SECRET is required when PAYMENT_PROVIDER=stripe")
+		}
+	}
 	frontendOrigin := strings.TrimSpace(getEnv("FRONTEND_ORIGIN", ""))
 	parsedFrontendOrigin, err := url.Parse(frontendOrigin)
 	if err != nil || parsedFrontendOrigin.Scheme == "" || parsedFrontendOrigin.Host == "" {
@@ -383,6 +395,8 @@ func Load() (*Config, error) {
 			RefundBatchSize:     int32(paymentRefundBatchSize),
 			FakeCheckoutBaseURL: paymentFakeCheckoutBaseURL,
 			FakeWebhookSecret:   paymentFakeWebhookSecret,
+			StripeSecretKey:     paymentStripeSecretKey,
+			StripeWebhookSecret: paymentStripeWebhookSecret,
 		},
 		Environment: environment,
 	}

@@ -17,6 +17,14 @@ type fakeWebhookVerifier struct {
 	err       error
 	payload   []byte
 	signature string
+	header    string
+}
+
+func (f *fakeWebhookVerifier) WebhookSignatureHeader() string {
+	if f.header != "" {
+		return f.header
+	}
+	return payments.FakeWebhookSignatureHeader
 }
 
 func (f *fakeWebhookVerifier) VerifyWebhook(payload []byte, signature string) (payments.WebhookEvent, error) {
@@ -74,6 +82,36 @@ func TestPaymentWebhookHandlerProcessesVerifiedEvent(t *testing.T) {
 	}
 	if !body.Received || !body.Processed || body.Duplicate || body.Ignored || body.AlreadyProcessed || body.RefundQueued || body.Retryable {
 		t.Errorf("response = %+v, want received and processed", body)
+	}
+}
+
+func TestPaymentWebhookHandlerUsesVerifierSignatureHeader(t *testing.T) {
+	verifier := &fakeWebhookVerifier{
+		header: "Stripe-Signature",
+		event: payments.WebhookEvent{
+			Provider:          payments.StripeProvider,
+			ProviderEventID:   "evt_123",
+			Type:              payments.PaymentSucceededEvent,
+			ProviderPaymentID: "pi_123",
+		},
+	}
+	handler := NewPaymentWebhookHandler(
+		verifier,
+		&fakeWebhookProcessor{result: payments.WebhookResult{Processed: true}},
+	)
+	request := httptest.NewRequest(http.MethodPost, "/payments/webhooks/stripe", strings.NewReader(`{}`))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Stripe-Signature", "stripe-signature")
+	request.Header.Set(FakeWebhookSignatureHeader, "wrong-header-signature")
+	response := httptest.NewRecorder()
+
+	handler.Handle(response, request)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body = %q", response.Code, http.StatusOK, response.Body.String())
+	}
+	if verifier.signature != "stripe-signature" {
+		t.Errorf("verifier signature = %q, want Stripe-Signature value", verifier.signature)
 	}
 }
 

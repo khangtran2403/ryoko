@@ -14,6 +14,7 @@ import (
 	"github.com/khangtran2403/ryoko/internal/auth"
 	"github.com/khangtran2403/ryoko/internal/handler"
 	"github.com/khangtran2403/ryoko/internal/middleware"
+	"github.com/khangtran2403/ryoko/internal/payments"
 )
 
 type healthyDatabase struct{}
@@ -74,6 +75,48 @@ func TestNewAPIHandlerProtectsPaymentSessionRoute(t *testing.T) {
 	}
 	if response.Header().Get("WWW-Authenticate") != "Bearer" {
 		t.Errorf("WWW-Authenticate = %q, want Bearer", response.Header().Get("WWW-Authenticate"))
+	}
+}
+
+func TestNewAPIHandlerRegistersOnlySelectedPaymentWebhook(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		provider     string
+		activePath   string
+		inactivePath string
+	}{
+		{
+			provider:     payments.FakeProvider,
+			activePath:   "/payments/webhooks/fake",
+			inactivePath: "/payments/webhooks/stripe",
+		},
+		{
+			provider:     payments.StripeProvider,
+			activePath:   "/payments/webhooks/stripe",
+			inactivePath: "/payments/webhooks/fake",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.provider, func(t *testing.T) {
+			t.Parallel()
+			apiHandler := newTestAPIHandlerForPaymentProvider(t, tt.provider)
+
+			activeRequest := httptest.NewRequest(http.MethodPost, tt.activePath, nil)
+			activeResponse := httptest.NewRecorder()
+			apiHandler.ServeHTTP(activeResponse, activeRequest)
+			if activeResponse.Code != http.StatusUnsupportedMediaType {
+				t.Fatalf("active route status = %d, want %d", activeResponse.Code, http.StatusUnsupportedMediaType)
+			}
+
+			inactiveRequest := httptest.NewRequest(http.MethodPost, tt.inactivePath, nil)
+			inactiveResponse := httptest.NewRecorder()
+			apiHandler.ServeHTTP(inactiveResponse, inactiveRequest)
+			if inactiveResponse.Code != http.StatusNotFound {
+				t.Fatalf("inactive route status = %d, want %d", inactiveResponse.Code, http.StatusNotFound)
+			}
+		})
 	}
 }
 
@@ -269,7 +312,18 @@ func newTestAPIHandler(t *testing.T) http.Handler {
 	return handler
 }
 
+func newTestAPIHandlerForPaymentProvider(t *testing.T, provider string) http.Handler {
+	t.Helper()
+	handler, _ := newTestAPIHandlerWithPaymentProvider(t, provider)
+	return handler
+}
+
 func newTestAPIHandlerWithTokenManager(t *testing.T) (http.Handler, *auth.TokenManager) {
+	t.Helper()
+	return newTestAPIHandlerWithPaymentProvider(t, payments.FakeProvider)
+}
+
+func newTestAPIHandlerWithPaymentProvider(t *testing.T, paymentProvider string) (http.Handler, *auth.TokenManager) {
 	t.Helper()
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
@@ -314,6 +368,7 @@ func newTestAPIHandlerWithTokenManager(t *testing.T) (http.Handler, *auth.TokenM
 		bookingHandler:        new(handler.BookingHandler),
 		paymentHandler:        new(handler.PaymentHandler),
 		paymentWebhookHandler: new(handler.PaymentWebhookHandler),
+		paymentProvider:       paymentProvider,
 		adminBookingHandler:   new(handler.AdminBookingHandler),
 		reviewHandler:         new(handler.ReviewHandler),
 		hotelImageHandler:     new(handler.HotelImageHandler),

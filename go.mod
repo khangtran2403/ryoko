@@ -5,6 +5,7 @@ go 1.25.4
 require (
 	github.com/jackc/pgx/v5 v5.10.0
 	github.com/joho/godotenv v1.5.1
+	github.com/stripe/stripe-go/v87 v87.0.0
 	golang.org/x/crypto v0.54.0
 	golang.org/x/oauth2 v0.36.0
 )
@@ -12,6 +13,7 @@ require (
 require (
 	github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc // indirect
 	github.com/pmezard/go-difflib v1.0.1-0.20181226105442-5d4384ee4fb2 // indirect
+	github.com/shopspring/decimal v1.4.0 // indirect
 )
 
 require (

@@ -7,17 +7,22 @@ import (
 
 var (
 	ErrGatewayUnavailable      = errors.New("payment gateway unavailable")
+	ErrInvalidAPIKey           = errors.New("invalid payment API key")
 	ErrInvalidCurrency         = errors.New("unsupported payment currency")
 	ErrInvalidCheckoutURL      = errors.New("invalid payment checkout URL")
 	ErrInvalidRequest          = errors.New("invalid payment gateway request")
 	ErrInvalidWebhookSecret    = errors.New("invalid payment webhook secret")
 	ErrInvalidWebhookPayload   = errors.New("invalid payment webhook payload")
 	ErrInvalidWebhookSignature = errors.New("invalid payment webhook signature")
+	ErrRefundNotSucceeded      = errors.New("payment refund not succeeded")
 )
 
 const (
-	PaymentSucceededEvent = "payment.succeeded"
-	PaymentFailedEvent    = "payment.failed"
+	PaymentSucceededEvent        = "payment.succeeded"
+	PaymentFailedEvent           = "payment.failed"
+	StripeProvider               = "stripe"
+	FakeWebhookSignatureHeader   = "X-Ryoko-Signature"
+	StripeWebhookSignatureHeader = "Stripe-Signature"
 )
 
 type CreatePaymentRequest struct {
@@ -58,5 +63,6 @@ type Gateway interface {
 }
 
 type WebhookVerifier interface {
+	WebhookSignatureHeader() string
 	VerifyWebhook(payload []byte, signature string) (WebhookEvent, error)
 }

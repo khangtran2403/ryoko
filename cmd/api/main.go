@@ -240,6 +240,7 @@ func main() {
 		bookingHandler:        bookingHandler,
 		paymentHandler:        paymentHandler,
 		paymentWebhookHandler: paymentWebhookHandler,
+		paymentProvider:       paymentGateway.Provider(),
 		adminBookingHandler:   adminBookingHandler,
 		reviewHandler:         reviewHandler,
 		hotelImageHandler:     hotelImageHandler,

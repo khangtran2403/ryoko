@@ -49,6 +49,10 @@ func (g *FakeGateway) Provider() string {
 	return FakeProvider
 }
 
+func (g *FakeGateway) WebhookSignatureHeader() string {
+	return FakeWebhookSignatureHeader
+}
+
 func (g *FakeGateway) CreatePayment(
 	_ context.Context,
 	request CreatePaymentRequest,
@@ -59,7 +63,7 @@ func (g *FakeGateway) CreatePayment(
 		strings.TrimSpace(request.IdempotencyKey) == "" {
 		return PaymentSession{}, ErrInvalidRequest
 	}
-	if !supportedFakeCurrency(request.Currency) {
+	if !supportedPaymentCurrency(request.Currency) {
 		return PaymentSession{}, ErrInvalidCurrency
 	}
 
@@ -82,7 +86,7 @@ func (g *FakeGateway) RefundPayment(_ context.Context, request RefundRequest) er
 		strings.TrimSpace(request.IdempotencyKey) == "" {
 		return ErrInvalidRequest
 	}
-	if !supportedFakeCurrency(request.Currency) {
+	if !supportedPaymentCurrency(request.Currency) {
 		return ErrInvalidCurrency
 	}
 	return nil
@@ -142,6 +146,6 @@ func (g *FakeGateway) VerifyWebhook(payload []byte, signature string) (WebhookEv
 	}, nil
 }
 
-func supportedFakeCurrency(currency string) bool {
+func supportedPaymentCurrency(currency string) bool {
 	return currency == "USD" || currency == "VND"
 }

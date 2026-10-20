@@ -77,6 +77,60 @@ func TestLoadPaymentConfig(t *testing.T) {
 	}
 }
 
+func TestLoadStripePaymentConfig(t *testing.T) {
+	setRequiredSMTPEnv(t)
+	t.Setenv("JWT_SECRET", "test-secret-that-is-at-least-32-bytes-long")
+	t.Setenv("PASSWORD_RESET_PEPPER", "test-password-reset-pepper-at-least-32-bytes-long")
+	t.Setenv("PAYMENT_PROVIDER", "  Stripe  ")
+	t.Setenv("STRIPE_SECRET_KEY", "sk_test_example")
+	t.Setenv("STRIPE_WEBHOOK_SECRET", "whsec_example")
+
+	loaded, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if loaded.Payment.Provider != "stripe" {
+		t.Errorf("Payment.Provider = %q, want %q", loaded.Payment.Provider, "stripe")
+	}
+	if loaded.Payment.StripeSecretKey != "sk_test_example" {
+		t.Error("Payment.StripeSecretKey does not match configured value")
+	}
+	if loaded.Payment.StripeWebhookSecret != "whsec_example" {
+		t.Error("Payment.StripeWebhookSecret does not match configured value")
+	}
+}
+
+func TestLoadRejectsMissingStripePaymentConfig(t *testing.T) {
+	tests := []struct {
+		name          string
+		secretKey     string
+		webhookSecret string
+		wantKey       string
+	}{
+		{name: "missing secret key", webhookSecret: "whsec_example", wantKey: "STRIPE_SECRET_KEY"},
+		{name: "missing webhook secret", secretKey: "sk_test_example", wantKey: "STRIPE_WEBHOOK_SECRET"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			setRequiredSMTPEnv(t)
+			t.Setenv("JWT_SECRET", "test-secret-that-is-at-least-32-bytes-long")
+			t.Setenv("PASSWORD_RESET_PEPPER", "test-password-reset-pepper-at-least-32-bytes-long")
+			t.Setenv("PAYMENT_PROVIDER", "stripe")
+			t.Setenv("STRIPE_SECRET_KEY", tt.secretKey)
+			t.Setenv("STRIPE_WEBHOOK_SECRET", tt.webhookSecret)
+
+			_, err := Load()
+			if err == nil {
+				t.Fatal("Load() returned nil error")
+			}
+			if !strings.Contains(err.Error(), tt.wantKey) {
+				t.Errorf("error = %q, want key %q", err, tt.wantKey)
+			}
+		})
+	}
+}
+
 func TestLoadRejectsInvalidPaymentConfig(t *testing.T) {
 	tests := []struct {
 		name  string

@@ -23,6 +23,15 @@ func newPaymentGateway(paymentConfig config.PaymentConfig) (paymentGateway, erro
 			return nil, fmt.Errorf("create fake payment gateway: %w", err)
 		}
 		return gateway, nil
+	case payments.StripeProvider:
+		gateway, err := payments.NewStripeGateway(
+			paymentConfig.StripeSecretKey,
+			paymentConfig.StripeWebhookSecret,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("create Stripe payment gateway: %w", err)
+		}
+		return gateway, nil
 	default:
 		return nil, fmt.Errorf("unsupported payment provider %q", paymentConfig.Provider)
 	}

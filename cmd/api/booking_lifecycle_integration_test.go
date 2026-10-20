@@ -1382,6 +1382,7 @@ func newBookingLifecycleServer(
 		bookingHandler:        handler.NewBookingHandler(diagnosticBookingService),
 		paymentHandler:        handler.NewPaymentHandler(paymentService),
 		paymentWebhookHandler: handler.NewPaymentWebhookHandler(paymentGateway, paymentWebhookService),
+		paymentProvider:       payments.FakeProvider,
 		adminBookingHandler:   handler.NewAdminBookingHandler(adminBookingService, diagnosticBookingService),
 		reviewHandler:         handler.NewReviewHandler(reviewService),
 		hotelImageHandler:     new(handler.HotelImageHandler),

@@ -753,6 +753,35 @@ paths:
         '415': {description: Content-Type is not application/json}
         '500': {$ref: '#/components/responses/InternalError'}
         '503': {$ref: '#/components/responses/ServiceUnavailable'}
+  /payments/webhooks/stripe:
+    post:
+      tags: [Payments]
+      operationId: receiveStripePaymentWebhook
+      description: |
+        Stripe callback enabled when `PAYMENT_PROVIDER=stripe`. The exact request
+        body is verified against `Stripe-Signature` using `STRIPE_WEBHOOK_SECRET`.
+      security: []
+      parameters:
+        - name: Stripe-Signature
+          in: header
+          required: true
+          schema: {type: string}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {type: object, additionalProperties: true}
+      responses:
+        '200':
+          description: Event received, including duplicate and ignored events
+          content: {application/json: {schema: {$ref: '#/components/schemas/PaymentWebhookResponse'}}}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '413': {description: Request body exceeds 64 KiB}
+        '415': {description: Content-Type is not application/json}
+        '500': {$ref: '#/components/responses/InternalError'}
+        '503': {$ref: '#/components/responses/ServiceUnavailable'}
   /me/bookings/{bookingID}/history:
     parameters:
       - {$ref: '#/components/parameters/BookingID'}

@@ -7,6 +7,7 @@ import (
 	"github.com/khangtran2403/ryoko/internal/auth"
 	"github.com/khangtran2403/ryoko/internal/handler"
 	"github.com/khangtran2403/ryoko/internal/middleware"
+	"github.com/khangtran2403/ryoko/internal/payments"
 )
 
 // apiDependencies contains the already-constructed HTTP-layer dependencies.
@@ -24,6 +25,7 @@ type apiDependencies struct {
 	bookingHandler        *handler.BookingHandler
 	paymentHandler        *handler.PaymentHandler
 	paymentWebhookHandler *handler.PaymentWebhookHandler
+	paymentProvider       string
 	adminBookingHandler   *handler.AdminBookingHandler
 	reviewHandler         *handler.ReviewHandler
 	hotelImageHandler     *handler.HotelImageHandler
@@ -79,7 +81,14 @@ func newAPIHandler(deps apiDependencies) http.Handler {
 	mux.Handle("POST /me/bookings/{bookingID}/cancel", deps.authMiddleware.Authenticate(http.HandlerFunc(deps.bookingHandler.CancelBooking)))
 	mux.Handle("POST /me/bookings/{bookingID}/payment-session", deps.authMiddleware.Authenticate(http.HandlerFunc(deps.paymentHandler.InitiatePayment)))
 	mux.Handle("GET /me/bookings/{bookingID}/payment", deps.authMiddleware.Authenticate(http.HandlerFunc(deps.paymentHandler.GetPaymentStatus)))
-	mux.HandleFunc("POST /payments/webhooks/fake", deps.paymentWebhookHandler.Handle)
+	switch deps.paymentProvider {
+	case payments.FakeProvider:
+		mux.HandleFunc("POST /payments/webhooks/fake", deps.paymentWebhookHandler.Handle)
+	case payments.StripeProvider:
+		mux.HandleFunc("POST /payments/webhooks/stripe", deps.paymentWebhookHandler.Handle)
+	default:
+		panic("unsupported payment webhook provider: " + deps.paymentProvider)
+	}
 	mux.Handle("POST /me/bookings/{bookingID}/review", deps.authMiddleware.Authenticate(http.HandlerFunc(deps.reviewHandler.CreateReview)))
 	mux.Handle("PUT /me/reviews/{reviewID}", deps.authMiddleware.Authenticate(http.HandlerFunc(deps.reviewHandler.UpdateReviewByUser)))
 	mux.Handle("DELETE /me/reviews/{reviewID}", deps.authMiddleware.Authenticate(http.HandlerFunc(deps.reviewHandler.DeleteReview)))

@@ -12,7 +12,7 @@ import (
 	"github.com/khangtran2403/ryoko/internal/payments"
 )
 
-const FakeWebhookSignatureHeader = "X-Ryoko-Signature"
+const FakeWebhookSignatureHeader = payments.FakeWebhookSignatureHeader
 
 type paymentWebhookProcessor interface {
 	ProcessWebhook(ctx context.Context, event payments.WebhookEvent) (payments.WebhookResult, error)
@@ -69,7 +69,7 @@ func (h *PaymentWebhookHandler) Handle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	event, err := h.verifier.VerifyWebhook(payload, r.Header.Get(FakeWebhookSignatureHeader))
+	event, err := h.verifier.VerifyWebhook(payload, r.Header.Get(h.verifier.WebhookSignatureHeader()))
 	switch {
 	case errors.Is(err, payments.ErrInvalidWebhookSignature):
 		http.Error(w, "Invalid webhook signature", http.StatusUnauthorized)
