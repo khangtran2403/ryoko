@@ -70,16 +70,19 @@ type DatabaseConfig struct {
 }
 
 type PaymentConfig struct {
-	Provider            string
-	PendingTTL          time.Duration
-	ExpirationInterval  time.Duration
-	ExpirationBatchSize int32
-	RefundInterval      time.Duration
-	RefundBatchSize     int32
-	FakeCheckoutBaseURL string
-	FakeWebhookSecret   string
-	StripeSecretKey     string
-	StripeWebhookSecret string
+	Provider                 string
+	PendingTTL               time.Duration
+	ExpirationInterval       time.Duration
+	ExpirationBatchSize      int32
+	RefundInterval           time.Duration
+	RefundBatchSize          int32
+	ReconciliationInterval   time.Duration
+	ReconciliationStaleAfter time.Duration
+	ReconciliationBatchSize  int32
+	FakeCheckoutBaseURL      string
+	FakeWebhookSecret        string
+	StripeSecretKey          string
+	StripeWebhookSecret      string
 }
 
 var cfg *Config
@@ -255,6 +258,26 @@ func Load() (*Config, error) {
 	if err != nil || paymentRefundBatchSize < 1 || paymentRefundBatchSize > 1000 {
 		return nil, fmt.Errorf("invalid PAYMENT_REFUND_BATCH_SIZE: must be an integer from 1 to 1000")
 	}
+	paymentReconciliationInterval, err := getEnvDuration(
+		"PAYMENT_RECONCILIATION_INTERVAL_SECONDS",
+		60,
+		"s",
+	)
+	if err != nil {
+		return nil, fmt.Errorf("invalid PAYMENT_RECONCILIATION_INTERVAL_SECONDS: %w", err)
+	}
+	paymentReconciliationStaleAfter, err := getEnvDuration(
+		"PAYMENT_RECONCILIATION_STALE_AFTER_SECONDS",
+		60,
+		"s",
+	)
+	if err != nil {
+		return nil, fmt.Errorf("invalid PAYMENT_RECONCILIATION_STALE_AFTER_SECONDS: %w", err)
+	}
+	paymentReconciliationBatchSize, err := getEnvInt("PAYMENT_RECONCILIATION_BATCH_SIZE", 100)
+	if err != nil || paymentReconciliationBatchSize < 1 || paymentReconciliationBatchSize > 1000 {
+		return nil, fmt.Errorf("invalid PAYMENT_RECONCILIATION_BATCH_SIZE: must be an integer from 1 to 1000")
+	}
 	paymentFakeCheckoutBaseURL := strings.TrimSpace(getEnv(
 		"PAYMENT_FAKE_CHECKOUT_BASE_URL",
 		"http://localhost:3000/payments/fake",
@@ -387,16 +410,19 @@ func Load() (*Config, error) {
 			CleanupInterval:    oauthCleanupInterval,
 		},
 		Payment: PaymentConfig{
-			Provider:            paymentProvider,
-			PendingTTL:          paymentPendingTTL,
-			ExpirationInterval:  paymentExpirationInterval,
-			ExpirationBatchSize: int32(paymentExpirationBatchSize),
-			RefundInterval:      paymentRefundInterval,
-			RefundBatchSize:     int32(paymentRefundBatchSize),
-			FakeCheckoutBaseURL: paymentFakeCheckoutBaseURL,
-			FakeWebhookSecret:   paymentFakeWebhookSecret,
-			StripeSecretKey:     paymentStripeSecretKey,
-			StripeWebhookSecret: paymentStripeWebhookSecret,
+			Provider:                 paymentProvider,
+			PendingTTL:               paymentPendingTTL,
+			ExpirationInterval:       paymentExpirationInterval,
+			ExpirationBatchSize:      int32(paymentExpirationBatchSize),
+			RefundInterval:           paymentRefundInterval,
+			RefundBatchSize:          int32(paymentRefundBatchSize),
+			ReconciliationInterval:   paymentReconciliationInterval,
+			ReconciliationStaleAfter: paymentReconciliationStaleAfter,
+			ReconciliationBatchSize:  int32(paymentReconciliationBatchSize),
+			FakeCheckoutBaseURL:      paymentFakeCheckoutBaseURL,
+			FakeWebhookSecret:        paymentFakeWebhookSecret,
+			StripeSecretKey:          paymentStripeSecretKey,
+			StripeWebhookSecret:      paymentStripeWebhookSecret,
 		},
 		Environment: environment,
 	}

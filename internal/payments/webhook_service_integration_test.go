@@ -185,6 +185,59 @@ func TestWebhookServiceQueuesRefundForLatePaymentSuccess(t *testing.T) {
 	assertPaymentWebhookState(t, pool, bookingID, paymentID, "cancelled", "refunded", 1, 3)
 }
 
+func TestWebhookServiceCancelsProviderCanceledPaymentAndReleasesInventory(t *testing.T) {
+	pool := newPaymentWebhookIntegrationPool(t)
+	service := NewWebhookService(pool, sqlc.New(pool))
+	bookingID, paymentID, providerPaymentID := insertPaymentWebhookFixture(t, pool, 15*time.Minute)
+	insertReservedAvailability(t, pool, bookingID)
+
+	event := WebhookEvent{
+		Provider:          FakeProvider,
+		ProviderEventID:   "evt-provider-canceled",
+		Type:              PaymentCanceledEvent,
+		ProviderPaymentID: providerPaymentID,
+	}
+	result, err := service.ProcessWebhook(context.Background(), event)
+	if err != nil {
+		t.Fatalf("ProcessWebhook() error = %v", err)
+	}
+	if !result.Processed || result.PaymentID != paymentID || result.BookingID != bookingID {
+		t.Fatalf("result = %+v", result)
+	}
+	assertPaymentWebhookState(t, pool, bookingID, paymentID, "cancelled", "expired", 1, 1)
+
+	var roomsBooked int32
+	if err := pool.QueryRow(context.Background(), `
+		SELECT rooms_booked
+		FROM room_type_availability AS a
+		JOIN bookings AS b ON b.room_type_id = a.room_type_id
+		WHERE b.id = $1 AND a.date = b.check_in`, bookingID).Scan(&roomsBooked); err != nil {
+		t.Fatalf("read released availability: %v", err)
+	}
+	if roomsBooked != 0 {
+		t.Errorf("rooms_booked = %d, want 0", roomsBooked)
+	}
+
+	var reason string
+	if err := pool.QueryRow(
+		context.Background(),
+		"SELECT reason FROM booking_status_history WHERE booking_id = $1",
+		bookingID,
+	).Scan(&reason); err != nil {
+		t.Fatalf("read cancellation history: %v", err)
+	}
+	if reason != "Payment canceled by provider" {
+		t.Errorf("reason = %q", reason)
+	}
+
+	event.ProviderEventID = "evt-provider-canceled-repeat"
+	repeated, err := service.ProcessWebhook(context.Background(), event)
+	if err != nil || !repeated.AlreadyProcessed {
+		t.Fatalf("repeated cancellation = %+v, %v", repeated, err)
+	}
+	assertPaymentWebhookState(t, pool, bookingID, paymentID, "cancelled", "expired", 1, 2)
+}
+
 func TestWebhookServiceRollsBackUnprocessableEvents(t *testing.T) {
 	pool := newPaymentWebhookIntegrationPool(t)
 	service := NewWebhookService(pool, sqlc.New(pool))

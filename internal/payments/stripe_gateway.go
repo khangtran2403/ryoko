@@ -13,8 +13,9 @@ import (
 	"github.com/stripe/stripe-go/v87/webhook"
 )
 
-type stripePaymentIntentCreator interface {
+type stripePaymentIntentClient interface {
 	Create(context.Context, *stripe.PaymentIntentCreateParams) (*stripe.PaymentIntent, error)
+	Retrieve(context.Context, string, *stripe.PaymentIntentRetrieveParams) (*stripe.PaymentIntent, error)
 }
 
 type stripeRefundCreator interface {
@@ -22,7 +23,7 @@ type stripeRefundCreator interface {
 }
 
 type StripeGateway struct {
-	paymentIntents stripePaymentIntentCreator
+	paymentIntents stripePaymentIntentClient
 	refunds        stripeRefundCreator
 	webhookSecret  string
 }
@@ -45,7 +46,7 @@ func NewStripeGateway(secretKey string, webhookSecret string) (*StripeGateway, e
 }
 
 func newStripeGateway(
-	paymentIntents stripePaymentIntentCreator,
+	paymentIntents stripePaymentIntentClient,
 	refunds stripeRefundCreator,
 	webhookSecret string,
 ) *StripeGateway {
@@ -53,6 +54,64 @@ func newStripeGateway(
 		paymentIntents: paymentIntents,
 		refunds:        refunds,
 		webhookSecret:  webhookSecret,
+	}
+}
+
+func (g *StripeGateway) LookupPayment(
+	ctx context.Context,
+	providerPaymentID string,
+) (ProviderPayment, error) {
+	providerPaymentID = strings.TrimSpace(providerPaymentID)
+	if providerPaymentID == "" {
+		return ProviderPayment{}, ErrInvalidRequest
+	}
+
+	paymentIntent, err := g.paymentIntents.Retrieve(
+		ctx,
+		providerPaymentID,
+		&stripe.PaymentIntentRetrieveParams{},
+	)
+	if err != nil {
+		return ProviderPayment{}, fmt.Errorf(
+			"%w: retrieve Stripe PaymentIntent: %w",
+			ErrGatewayUnavailable,
+			err,
+		)
+	}
+	if paymentIntent == nil || strings.TrimSpace(paymentIntent.ID) != providerPaymentID {
+		return ProviderPayment{}, fmt.Errorf(
+			"%w: Stripe returned an invalid PaymentIntent",
+			ErrGatewayUnavailable,
+		)
+	}
+
+	switch paymentIntent.Status {
+	case stripe.PaymentIntentStatusSucceeded:
+		return ProviderPayment{State: ProviderPaymentSucceeded}, nil
+	case stripe.PaymentIntentStatusCanceled:
+		return ProviderPayment{State: ProviderPaymentCanceled}, nil
+	case stripe.PaymentIntentStatusRequiresPaymentMethod:
+		if paymentIntent.LastPaymentError == nil {
+			return ProviderPayment{State: ProviderPaymentPending}, nil
+		}
+		failureCode, failureMessage := stripePaymentFailure(paymentIntent.LastPaymentError)
+		return ProviderPayment{
+			State:          ProviderPaymentFailed,
+			FailureCode:    failureCode,
+			FailureMessage: failureMessage,
+		}, nil
+	case stripe.PaymentIntentStatusProcessing,
+		stripe.PaymentIntentStatusRequiresAction,
+		stripe.PaymentIntentStatusRequiresCapture,
+		stripe.PaymentIntentStatusRequiresConfirmation:
+		return ProviderPayment{State: ProviderPaymentPending}, nil
+	default:
+		return ProviderPayment{}, fmt.Errorf(
+			"%w: Stripe PaymentIntent %s has status %q",
+			ErrUnsupportedPaymentState,
+			providerPaymentID,
+			paymentIntent.Status,
+		)
 	}
 }
 
@@ -199,6 +258,18 @@ func (g *StripeGateway) VerifyWebhook(payload []byte, signature string) (Webhook
 			ProviderPaymentID: paymentIntent.ID,
 			FailureCode:       failureCode,
 			FailureMessage:    failureMessage,
+		}, nil
+
+	case stripe.EventTypePaymentIntentCanceled:
+		paymentIntent, err := decodeStripePaymentIntent(event.Data.Raw)
+		if err != nil {
+			return WebhookEvent{}, err
+		}
+		return WebhookEvent{
+			Provider:          StripeProvider,
+			ProviderEventID:   providerEventID,
+			Type:              PaymentCanceledEvent,
+			ProviderPaymentID: paymentIntent.ID,
 		}, nil
 
 	default:

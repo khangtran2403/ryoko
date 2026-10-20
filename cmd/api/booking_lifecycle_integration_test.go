@@ -896,6 +896,27 @@ func TestReviewHTTPLifecycleIntegration(t *testing.T) {
 	)
 	var completedBooking handler.BookingResponse
 	decodeAPIResponse(t, createdBody, &completedBooking)
+	paymentSessionBody := doAPIRequest(
+		t,
+		client,
+		http.MethodPost,
+		server.URL+"/me/bookings/"+strconv.FormatInt(completedBooking.ID, 10)+"/payment-session",
+		ownerLogin.AccessToken,
+		"",
+		nil,
+		http.StatusCreated,
+	)
+	var paymentSession handler.PaymentSessionResponse
+	decodeAPIResponse(t, paymentSessionBody, &paymentSession)
+	paymentWebhookPayload, err := json.Marshal(map[string]any{
+		"id":                  "review-lifecycle-payment-succeeded",
+		"type":                payments.PaymentSucceededEvent,
+		"provider_payment_id": paymentSession.ProviderPaymentID,
+	})
+	if err != nil {
+		t.Fatalf("encode review payment webhook: %v", err)
+	}
+	doPaymentWebhookRequest(t, client, server.URL, paymentWebhookPayload, http.StatusOK)
 	reviewCreateURL := server.URL + "/me/bookings/" + strconv.FormatInt(completedBooking.ID, 10) + "/review"
 
 	// Confirmed bookings and bookings owned by someone else are not reviewable.
@@ -1015,6 +1036,27 @@ func TestReviewHTTPLifecycleIntegration(t *testing.T) {
 	)
 	var cancelledBooking handler.BookingResponse
 	decodeAPIResponse(t, cancelBookingBody, &cancelledBooking)
+	cancelPaymentSessionBody := doAPIRequest(
+		t,
+		client,
+		http.MethodPost,
+		server.URL+"/me/bookings/"+strconv.FormatInt(cancelledBooking.ID, 10)+"/payment-session",
+		ownerLogin.AccessToken,
+		"",
+		nil,
+		http.StatusCreated,
+	)
+	var cancelPaymentSession handler.PaymentSessionResponse
+	decodeAPIResponse(t, cancelPaymentSessionBody, &cancelPaymentSession)
+	cancelPaymentWebhookPayload, err := json.Marshal(map[string]any{
+		"id":                  "cancelled-review-booking-payment-succeeded",
+		"type":                payments.PaymentSucceededEvent,
+		"provider_payment_id": cancelPaymentSession.ProviderPaymentID,
+	})
+	if err != nil {
+		t.Fatalf("encode cancelled-review payment webhook: %v", err)
+	}
+	doPaymentWebhookRequest(t, client, server.URL, cancelPaymentWebhookPayload, http.StatusOK)
 	doAPIRequest(
 		t,
 		client,

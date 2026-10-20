@@ -198,6 +198,18 @@ func main() {
 		cfg.Payment.RefundInterval,
 		log.Default(),
 	)
+	paymentReconciliationService := payments.NewReconciliationService(
+		queries,
+		paymentGateway,
+		paymentWebhookService,
+		cfg.Payment.ReconciliationStaleAfter,
+		cfg.Payment.ReconciliationBatchSize,
+	)
+	paymentReconciliationWorker := payments.NewReconciliationWorker(
+		paymentReconciliationService,
+		cfg.Payment.ReconciliationInterval,
+		log.Default(),
+	)
 	bookingService := booking.NewService(pool, queries, booking.PaymentSettings{
 		Provider:   cfg.Payment.Provider,
 		PendingTTL: cfg.Payment.PendingTTL,
@@ -254,7 +266,7 @@ func main() {
 
 	var workerWG sync.WaitGroup
 
-	workerWG.Add(6)
+	workerWG.Add(7)
 	go func() {
 		defer workerWG.Done()
 		completionWorker.Run(appCtx)
@@ -278,6 +290,10 @@ func main() {
 	go func() {
 		defer workerWG.Done()
 		paymentRefundWorker.Run(appCtx)
+	}()
+	go func() {
+		defer workerWG.Done()
+		paymentReconciliationWorker.Run(appCtx)
 	}()
 
 	serverErrors := make(chan error, 1)

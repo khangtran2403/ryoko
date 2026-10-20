@@ -11,11 +11,17 @@ import (
 func TestRefundServiceRetriesProviderFailureAndMarksRefunded(t *testing.T) {
 	pool := newPaymentWebhookIntegrationPool(t)
 	bookingID, paymentID, providerPaymentID := insertPaymentWebhookFixture(t, pool, 15*time.Minute)
+	if _, err := pool.Exec(
+		context.Background(),
+		"UPDATE bookings SET status = 'cancelled' WHERE id = $1",
+		bookingID,
+	); err != nil {
+		t.Fatalf("prepare cancelled booking: %v", err)
+	}
 	if _, err := pool.Exec(context.Background(), `
-		UPDATE bookings SET status = 'cancelled' WHERE id = $1;
 		UPDATE payments
-		SET status = 'refund_pending', provider_payment_id = $2, paid_at = now()
-		WHERE id = $3`, bookingID, providerPaymentID, paymentID); err != nil {
+		SET status = 'refund_pending', provider_payment_id = $1, paid_at = now()
+		WHERE id = $2`, providerPaymentID, paymentID); err != nil {
 		t.Fatalf("prepare refund-pending payment: %v", err)
 	}
 

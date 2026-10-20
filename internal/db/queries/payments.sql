@@ -309,6 +309,36 @@ WHERE status = 'refund_pending'
 ORDER BY updated_at, id
 LIMIT sqlc.arg(batch_size)::int;
 
+-- name: ListPaymentsForReconciliation :many
+SELECT
+    id,
+    booking_id,
+    provider,
+    provider_payment_id,
+    provider_idempotency_key,
+    amount_minor,
+    currency,
+    status,
+    failure_code,
+    failure_message,
+    paid_at,
+    refunded_at,
+    created_at,
+    updated_at
+FROM payments
+WHERE provider = sqlc.arg(provider)
+  AND status = 'pending'
+  AND provider_payment_id IS NOT NULL
+  AND updated_at <= sqlc.arg(updated_before)
+ORDER BY updated_at, id
+LIMIT sqlc.arg(batch_size)::int;
+
+-- name: TouchPendingPaymentReconciliation :execrows
+UPDATE payments
+SET updated_at = now()
+WHERE id = sqlc.arg(payment_id)
+  AND status = 'pending';
+
 -- name: RecordPaymentRefundFailure :exec
 UPDATE payments
 SET

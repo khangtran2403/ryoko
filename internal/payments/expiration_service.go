@@ -68,6 +68,19 @@ func expirePendingPayment(ctx context.Context, qtx *sqlc.Queries, booking sqlc.B
 	if err != nil {
 		return fmt.Errorf("lock payment: %w", err)
 	}
+	return cancelPendingBookingAndPayment(ctx, qtx, booking, payment, "Payment window expired")
+}
+
+func cancelPendingBookingAndPayment(
+	ctx context.Context,
+	qtx *sqlc.Queries,
+	booking sqlc.Booking,
+	payment sqlc.Payment,
+	reason string,
+) error {
+	if booking.Status != "pending_payment" {
+		return fmt.Errorf("booking invariant violated: status is %q", booking.Status)
+	}
 	if payment.Status != "pending" {
 		return fmt.Errorf("payment invariant violated: status is %q", payment.Status)
 	}
@@ -116,7 +129,7 @@ func expirePendingPayment(ctx context.Context, qtx *sqlc.Queries, booking sqlc.B
 		BookingID:  booking.ID,
 		FromStatus: pgtype.Text{String: "pending_payment", Valid: true},
 		ToStatus:   "cancelled",
-		Reason:     pgtype.Text{String: "Payment window expired", Valid: true},
+		Reason:     pgtype.Text{String: reason, Valid: true},
 	})
 	if err != nil {
 		return fmt.Errorf("record expiration history: %w", err)

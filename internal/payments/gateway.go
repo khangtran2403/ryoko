@@ -15,15 +15,32 @@ var (
 	ErrInvalidWebhookPayload   = errors.New("invalid payment webhook payload")
 	ErrInvalidWebhookSignature = errors.New("invalid payment webhook signature")
 	ErrRefundNotSucceeded      = errors.New("payment refund not succeeded")
+	ErrUnsupportedPaymentState = errors.New("unsupported provider payment state")
 )
 
 const (
 	PaymentSucceededEvent        = "payment.succeeded"
 	PaymentFailedEvent           = "payment.failed"
+	PaymentCanceledEvent         = "payment.canceled"
 	StripeProvider               = "stripe"
 	FakeWebhookSignatureHeader   = "X-Ryoko-Signature"
 	StripeWebhookSignatureHeader = "Stripe-Signature"
 )
+
+type ProviderPaymentState string
+
+const (
+	ProviderPaymentPending   ProviderPaymentState = "pending"
+	ProviderPaymentSucceeded ProviderPaymentState = "succeeded"
+	ProviderPaymentFailed    ProviderPaymentState = "failed"
+	ProviderPaymentCanceled  ProviderPaymentState = "canceled"
+)
+
+type ProviderPayment struct {
+	State          ProviderPaymentState
+	FailureCode    string
+	FailureMessage string
+}
 
 type CreatePaymentRequest struct {
 	PaymentID      int64
@@ -59,6 +76,7 @@ type WebhookEvent struct {
 type Gateway interface {
 	Provider() string
 	CreatePayment(ctx context.Context, request CreatePaymentRequest) (PaymentSession, error)
+	LookupPayment(ctx context.Context, providerPaymentID string) (ProviderPayment, error)
 	RefundPayment(ctx context.Context, request RefundRequest) error
 }
 

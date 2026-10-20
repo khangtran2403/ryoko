@@ -147,6 +147,27 @@ func TestFakeGatewayRefundPayment(t *testing.T) {
 	}
 }
 
+func TestFakeGatewayLookupPayment(t *testing.T) {
+	t.Parallel()
+
+	gateway, err := NewFakeGateway("https://app.example.com/payments/fake", fakeWebhookTestSecret)
+	if err != nil {
+		t.Fatalf("NewFakeGateway() error = %v", err)
+	}
+
+	payment, err := gateway.LookupPayment(context.Background(), "fake-payment-17")
+	if err != nil {
+		t.Fatalf("LookupPayment() error = %v", err)
+	}
+	if payment.State != ProviderPaymentPending {
+		t.Errorf("LookupPayment() state = %q, want %q", payment.State, ProviderPaymentPending)
+	}
+
+	if _, err := gateway.LookupPayment(context.Background(), "   "); !errors.Is(err, ErrInvalidRequest) {
+		t.Fatalf("LookupPayment() error = %v, want ErrInvalidRequest", err)
+	}
+}
+
 func TestFakeGatewayVerifyWebhook(t *testing.T) {
 	t.Parallel()
 

@@ -92,6 +92,16 @@ func (g *FakeGateway) RefundPayment(_ context.Context, request RefundRequest) er
 	return nil
 }
 
+func (g *FakeGateway) LookupPayment(
+	_ context.Context,
+	providerPaymentID string,
+) (ProviderPayment, error) {
+	if strings.TrimSpace(providerPaymentID) == "" {
+		return ProviderPayment{}, ErrInvalidRequest
+	}
+	return ProviderPayment{State: ProviderPaymentPending}, nil
+}
+
 func (g *FakeGateway) VerifyWebhook(payload []byte, signature string) (WebhookEvent, error) {
 	providedSignature, err := hex.DecodeString(strings.TrimSpace(signature))
 	if err != nil || len(providedSignature) != sha256.Size {

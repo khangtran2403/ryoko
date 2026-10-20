@@ -15,10 +15,14 @@ import (
 const stripeWebhookTestSecret = "whsec_stripe_webhook_test_secret"
 
 type recordingStripePaymentIntentCreator struct {
-	ctx    context.Context
-	params *stripe.PaymentIntentCreateParams
-	result *stripe.PaymentIntent
-	err    error
+	ctx            context.Context
+	params         *stripe.PaymentIntentCreateParams
+	result         *stripe.PaymentIntent
+	err            error
+	retrieveID     string
+	retrieveParams *stripe.PaymentIntentRetrieveParams
+	retrieveResult *stripe.PaymentIntent
+	retrieveErr    error
 }
 
 type recordingStripeRefundCreator struct {
@@ -44,6 +48,17 @@ func (c *recordingStripePaymentIntentCreator) Create(
 	c.ctx = ctx
 	c.params = params
 	return c.result, c.err
+}
+
+func (c *recordingStripePaymentIntentCreator) Retrieve(
+	ctx context.Context,
+	id string,
+	params *stripe.PaymentIntentRetrieveParams,
+) (*stripe.PaymentIntent, error) {
+	c.ctx = ctx
+	c.retrieveID = id
+	c.retrieveParams = params
+	return c.retrieveResult, c.retrieveErr
 }
 
 func TestNewStripeGatewayRejectsMissingSecretKey(t *testing.T) {
@@ -186,6 +201,85 @@ func TestStripeGatewayMapsCreateFailure(t *testing.T) {
 	}
 	if !errors.Is(err, stripeErr) {
 		t.Fatalf("CreatePayment() error = %v, want wrapped Stripe error", err)
+	}
+}
+
+func TestStripeGatewayLookupPaymentMapsStatuses(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name   string
+		intent *stripe.PaymentIntent
+		want   ProviderPayment
+	}{
+		{
+			name:   "succeeded",
+			intent: &stripe.PaymentIntent{ID: "pi_123", Status: stripe.PaymentIntentStatusSucceeded},
+			want:   ProviderPayment{State: ProviderPaymentSucceeded},
+		},
+		{
+			name:   "canceled",
+			intent: &stripe.PaymentIntent{ID: "pi_123", Status: stripe.PaymentIntentStatusCanceled},
+			want:   ProviderPayment{State: ProviderPaymentCanceled},
+		},
+		{
+			name:   "processing",
+			intent: &stripe.PaymentIntent{ID: "pi_123", Status: stripe.PaymentIntentStatusProcessing},
+			want:   ProviderPayment{State: ProviderPaymentPending},
+		},
+		{
+			name: "failed",
+			intent: &stripe.PaymentIntent{
+				ID:     "pi_123",
+				Status: stripe.PaymentIntentStatusRequiresPaymentMethod,
+				LastPaymentError: &stripe.Error{
+					Code:        stripe.ErrorCodeCardDeclined,
+					DeclineCode: stripe.DeclineCodeInsufficientFunds,
+					Msg:         "insufficient funds",
+				},
+			},
+			want: ProviderPayment{
+				State:          ProviderPaymentFailed,
+				FailureCode:    "insufficient_funds",
+				FailureMessage: "insufficient funds",
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			client := &recordingStripePaymentIntentCreator{retrieveResult: test.intent}
+			gateway := newStripeGateway(client, nil, stripeWebhookTestSecret)
+			got, err := gateway.LookupPayment(context.Background(), " pi_123 ")
+			if err != nil {
+				t.Fatalf("LookupPayment() error = %v", err)
+			}
+			if got != test.want {
+				t.Errorf("LookupPayment() = %+v, want %+v", got, test.want)
+			}
+			if client.retrieveID != "pi_123" || client.retrieveParams == nil {
+				t.Errorf("retrieve call = id %q params %+v", client.retrieveID, client.retrieveParams)
+			}
+		})
+	}
+}
+
+func TestStripeGatewayLookupPaymentMapsProviderErrors(t *testing.T) {
+	t.Parallel()
+
+	providerErr := errors.New("Stripe unavailable")
+	client := &recordingStripePaymentIntentCreator{retrieveErr: providerErr}
+	gateway := newStripeGateway(client, nil, stripeWebhookTestSecret)
+	_, err := gateway.LookupPayment(context.Background(), "pi_123")
+	if !errors.Is(err, ErrGatewayUnavailable) || !errors.Is(err, providerErr) {
+		t.Fatalf("LookupPayment() error = %v", err)
+	}
+
+	client.retrieveErr = nil
+	client.retrieveResult = &stripe.PaymentIntent{ID: "pi_123", Status: "future_status"}
+	_, err = gateway.LookupPayment(context.Background(), "pi_123")
+	if !errors.Is(err, ErrUnsupportedPaymentState) {
+		t.Fatalf("unknown status error = %v", err)
 	}
 }
 
@@ -397,6 +491,30 @@ func TestStripeGatewayVerifyFailedWebhookUsesFallbackCode(t *testing.T) {
 	}
 	if event.FailureCode != "payment_failed" || event.FailureMessage != "" {
 		t.Errorf("failure = {%q %q}, want fallback code", event.FailureCode, event.FailureMessage)
+	}
+}
+
+func TestStripeGatewayVerifyCanceledWebhook(t *testing.T) {
+	t.Parallel()
+
+	gateway := newStripeGateway(nil, nil, stripeWebhookTestSecret)
+	signed := signedStripeWebhook(t, stripe.EventTypePaymentIntentCanceled, map[string]any{
+		"id":     "pi_canceled",
+		"object": "payment_intent",
+	})
+
+	event, err := gateway.VerifyWebhook(signed.Payload, signed.Header)
+	if err != nil {
+		t.Fatalf("VerifyWebhook() error = %v", err)
+	}
+	want := WebhookEvent{
+		Provider:          StripeProvider,
+		ProviderEventID:   "evt_test_123",
+		Type:              PaymentCanceledEvent,
+		ProviderPaymentID: "pi_canceled",
+	}
+	if event != want {
+		t.Errorf("VerifyWebhook() = %+v, want %+v", event, want)
 	}
 }
 

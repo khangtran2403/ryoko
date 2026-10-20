@@ -44,6 +44,9 @@ func TestLoadPaymentConfig(t *testing.T) {
 	t.Setenv("PAYMENT_EXPIRATION_BATCH_SIZE", "250")
 	t.Setenv("PAYMENT_REFUND_INTERVAL_SECONDS", "60")
 	t.Setenv("PAYMENT_REFUND_BATCH_SIZE", "75")
+	t.Setenv("PAYMENT_RECONCILIATION_INTERVAL_SECONDS", "90")
+	t.Setenv("PAYMENT_RECONCILIATION_STALE_AFTER_SECONDS", "120")
+	t.Setenv("PAYMENT_RECONCILIATION_BATCH_SIZE", "50")
 	t.Setenv("PAYMENT_FAKE_CHECKOUT_BASE_URL", "https://app.example.com/payments/fake")
 	t.Setenv("PAYMENT_FAKE_WEBHOOK_SECRET", "custom-payment-webhook-secret-at-least-32-bytes")
 
@@ -68,6 +71,15 @@ func TestLoadPaymentConfig(t *testing.T) {
 	}
 	if loaded.Payment.RefundBatchSize != 75 {
 		t.Errorf("Payment.RefundBatchSize = %d, want 75", loaded.Payment.RefundBatchSize)
+	}
+	if loaded.Payment.ReconciliationInterval != 90*time.Second {
+		t.Errorf("Payment.ReconciliationInterval = %v, want 1m30s", loaded.Payment.ReconciliationInterval)
+	}
+	if loaded.Payment.ReconciliationStaleAfter != 2*time.Minute {
+		t.Errorf("Payment.ReconciliationStaleAfter = %v, want 2m", loaded.Payment.ReconciliationStaleAfter)
+	}
+	if loaded.Payment.ReconciliationBatchSize != 50 {
+		t.Errorf("Payment.ReconciliationBatchSize = %d, want 50", loaded.Payment.ReconciliationBatchSize)
 	}
 	if loaded.Payment.FakeCheckoutBaseURL != "https://app.example.com/payments/fake" {
 		t.Errorf("Payment.FakeCheckoutBaseURL = %q", loaded.Payment.FakeCheckoutBaseURL)
@@ -148,6 +160,11 @@ func TestLoadRejectsInvalidPaymentConfig(t *testing.T) {
 		{name: "invalid refund batch size", key: "PAYMENT_REFUND_BATCH_SIZE", value: "invalid"},
 		{name: "zero refund batch size", key: "PAYMENT_REFUND_BATCH_SIZE", value: "0"},
 		{name: "large refund batch size", key: "PAYMENT_REFUND_BATCH_SIZE", value: "1001"},
+		{name: "zero reconciliation interval", key: "PAYMENT_RECONCILIATION_INTERVAL_SECONDS", value: "0"},
+		{name: "zero reconciliation stale after", key: "PAYMENT_RECONCILIATION_STALE_AFTER_SECONDS", value: "0"},
+		{name: "invalid reconciliation batch size", key: "PAYMENT_RECONCILIATION_BATCH_SIZE", value: "invalid"},
+		{name: "zero reconciliation batch size", key: "PAYMENT_RECONCILIATION_BATCH_SIZE", value: "0"},
+		{name: "large reconciliation batch size", key: "PAYMENT_RECONCILIATION_BATCH_SIZE", value: "1001"},
 		{name: "relative fake checkout URL", key: "PAYMENT_FAKE_CHECKOUT_BASE_URL", value: "/payments/fake"},
 		{name: "unsupported fake checkout scheme", key: "PAYMENT_FAKE_CHECKOUT_BASE_URL", value: "ftp://example.com/payments/fake"},
 		{name: "fake checkout URL with credentials", key: "PAYMENT_FAKE_CHECKOUT_BASE_URL", value: "https://user@example.com/payments/fake"},

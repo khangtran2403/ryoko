@@ -412,6 +412,72 @@ func (q *Queries) GetPaymentByProviderIDForUpdate(ctx context.Context, arg GetPa
 	return i, err
 }
 
+const listPaymentsForReconciliation = `-- name: ListPaymentsForReconciliation :many
+SELECT
+    id,
+    booking_id,
+    provider,
+    provider_payment_id,
+    provider_idempotency_key,
+    amount_minor,
+    currency,
+    status,
+    failure_code,
+    failure_message,
+    paid_at,
+    refunded_at,
+    created_at,
+    updated_at
+FROM payments
+WHERE provider = $1
+  AND status = 'pending'
+  AND provider_payment_id IS NOT NULL
+  AND updated_at <= $2
+ORDER BY updated_at, id
+LIMIT $3::int
+`
+
+type ListPaymentsForReconciliationParams struct {
+	Provider      string             `json:"provider"`
+	UpdatedBefore pgtype.Timestamptz `json:"updated_before"`
+	BatchSize     int32              `json:"batch_size"`
+}
+
+func (q *Queries) ListPaymentsForReconciliation(ctx context.Context, arg ListPaymentsForReconciliationParams) ([]Payment, error) {
+	rows, err := q.db.Query(ctx, listPaymentsForReconciliation, arg.Provider, arg.UpdatedBefore, arg.BatchSize)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []Payment
+	for rows.Next() {
+		var i Payment
+		if err := rows.Scan(
+			&i.ID,
+			&i.BookingID,
+			&i.Provider,
+			&i.ProviderPaymentID,
+			&i.ProviderIdempotencyKey,
+			&i.AmountMinor,
+			&i.Currency,
+			&i.Status,
+			&i.FailureCode,
+			&i.FailureMessage,
+			&i.PaidAt,
+			&i.RefundedAt,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listRefundPendingPayments = `-- name: ListRefundPendingPayments :many
 SELECT
     id,
@@ -831,4 +897,19 @@ func (q *Queries) SetPaymentProviderID(ctx context.Context, arg SetPaymentProvid
 		&i.UpdatedAt,
 	)
 	return i, err
+}
+
+const touchPendingPaymentReconciliation = `-- name: TouchPendingPaymentReconciliation :execrows
+UPDATE payments
+SET updated_at = now()
+WHERE id = $1
+  AND status = 'pending'
+`
+
+func (q *Queries) TouchPendingPaymentReconciliation(ctx context.Context, paymentID int64) (int64, error) {
+	result, err := q.db.Exec(ctx, touchPendingPaymentReconciliation, paymentID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
 }

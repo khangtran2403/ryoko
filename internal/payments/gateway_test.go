@@ -15,6 +15,9 @@ type recordingGateway struct {
 	createSession PaymentSession
 	createErr     error
 	createCalls   []CreatePaymentRequest
+	lookupPayment ProviderPayment
+	lookupErr     error
+	lookupCalls   []string
 
 	refundErr   error
 	refundCalls []RefundRequest
@@ -50,6 +53,17 @@ func (g *recordingGateway) RefundPayment(
 	return g.refundErr
 }
 
+func (g *recordingGateway) LookupPayment(
+	_ context.Context,
+	providerPaymentID string,
+) (ProviderPayment, error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+
+	g.lookupCalls = append(g.lookupCalls, providerPaymentID)
+	return g.lookupPayment, g.lookupErr
+}
+
 func (g *recordingGateway) recordedCreateCalls() []CreatePaymentRequest {
 	g.mu.Lock()
 	defer g.mu.Unlock()
@@ -62,6 +76,13 @@ func (g *recordingGateway) recordedRefundCalls() []RefundRequest {
 	defer g.mu.Unlock()
 
 	return append([]RefundRequest(nil), g.refundCalls...)
+}
+
+func (g *recordingGateway) recordedLookupCalls() []string {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+
+	return append([]string(nil), g.lookupCalls...)
 }
 
 func TestRecordingGatewayCreatePayment(t *testing.T) {

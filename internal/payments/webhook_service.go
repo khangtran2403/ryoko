@@ -64,7 +64,8 @@ func (s *WebhookService) ProcessWebhook(
 		(event.FailureCode == "" || len(event.FailureCode) > 100 || len(event.FailureMessage) > 1000) {
 		return WebhookResult{}, ErrInvalidWebhookEvent
 	}
-	if event.Type == PaymentSucceededEvent && (event.FailureCode != "" || event.FailureMessage != "") {
+	if (event.Type == PaymentSucceededEvent || event.Type == PaymentCanceledEvent) &&
+		(event.FailureCode != "" || event.FailureMessage != "") {
 		return WebhookResult{}, ErrInvalidWebhookEvent
 	}
 
@@ -87,7 +88,9 @@ func (s *WebhookService) ProcessWebhook(
 		return WebhookResult{}, fmt.Errorf("claim payment webhook event: %w", err)
 	}
 
-	if event.Type != PaymentSucceededEvent && event.Type != PaymentFailedEvent {
+	if event.Type != PaymentSucceededEvent &&
+		event.Type != PaymentFailedEvent &&
+		event.Type != PaymentCanceledEvent {
 		if err := tx.Commit(ctx); err != nil {
 			return WebhookResult{}, fmt.Errorf("commit ignored payment webhook: %w", err)
 		}
@@ -131,6 +134,29 @@ func (s *WebhookService) ProcessWebhook(
 	result := WebhookResult{
 		PaymentID: payment.ID,
 		BookingID: payment.BookingID,
+	}
+	if event.Type == PaymentCanceledEvent {
+		if payment.Status != "pending" {
+			if err := tx.Commit(ctx); err != nil {
+				return WebhookResult{}, fmt.Errorf("commit repeated payment cancellation: %w", err)
+			}
+			result.AlreadyProcessed = true
+			return result, nil
+		}
+		if err := cancelPendingBookingAndPayment(
+			ctx,
+			qtx,
+			lockedBooking,
+			payment,
+			"Payment canceled by provider",
+		); err != nil {
+			return WebhookResult{}, fmt.Errorf("cancel provider-canceled payment: %w", err)
+		}
+		if err := tx.Commit(ctx); err != nil {
+			return WebhookResult{}, fmt.Errorf("commit payment cancellation: %w", err)
+		}
+		result.Processed = true
+		return result, nil
 	}
 	if event.Type == PaymentFailedEvent {
 		if payment.Status != "pending" {
