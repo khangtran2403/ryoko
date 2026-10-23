@@ -26,6 +26,7 @@ import (
 	"github.com/khangtran2403/ryoko/internal/inventory"
 	"github.com/khangtran2403/ryoko/internal/mailer"
 	"github.com/khangtran2403/ryoko/internal/middleware"
+	notification "github.com/khangtran2403/ryoko/internal/notifications"
 	"github.com/khangtran2403/ryoko/internal/oauth"
 	"github.com/khangtran2403/ryoko/internal/passwordreset"
 	"github.com/khangtran2403/ryoko/internal/payments"
@@ -116,6 +117,7 @@ func main() {
 		oauthService,
 		refreshCookies,
 		cfg.OAuth.SuccessRedirectURL,
+		log.Default(),
 	)
 	if err != nil {
 		log.Fatalf("create OAuth handler: %v", err)
@@ -148,6 +150,20 @@ func main() {
 	passwordResetCleanupWorker := passwordreset.NewCleanupWorker(
 		passwordResetService,
 		cfg.PasswordReset.CleanupInterval,
+		log.Default(),
+	)
+	emailOutboxService := notification.NewService(
+		queries,
+		emailSender,
+		cfg.EmailOutbox.LeaseDuration,
+		cfg.EmailOutbox.BatchSize,
+		cfg.EmailOutbox.MaxAttempts,
+		cfg.EmailOutbox.BaseRetryDelay,
+	)
+	emailOutboxWorker := notification.NewWorker(
+		emailOutboxService,
+		cfg.EmailOutbox.Interval,
+		cfg.EmailOutbox.RunTimeout,
 		log.Default(),
 	)
 	authMiddleware := middleware.NewAuthMiddleware(tokenManager)
@@ -266,7 +282,7 @@ func main() {
 
 	var workerWG sync.WaitGroup
 
-	workerWG.Add(7)
+	workerWG.Add(8)
 	go func() {
 		defer workerWG.Done()
 		completionWorker.Run(appCtx)
@@ -294,6 +310,10 @@ func main() {
 	go func() {
 		defer workerWG.Done()
 		paymentReconciliationWorker.Run(appCtx)
+	}()
+	go func() {
+		defer workerWG.Done()
+		emailOutboxWorker.Run(appCtx)
 	}()
 
 	serverErrors := make(chan error, 1)

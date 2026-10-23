@@ -111,7 +111,10 @@ func TestSetBlockedInventoryRejectsExistingBookingConflictWithoutPartialUpdate(t
 func TestBookingCreationHonorsBlockedInventory(t *testing.T) {
 	pool, inventoryService := newInventoryIntegrationService(t)
 	userID, roomTypeID := insertInventoryFixtures(t, pool, 5)
-	bookingService := booking.NewService(pool, sqlc.New(pool))
+	bookingService := booking.NewService(pool, sqlc.New(pool), booking.PaymentSettings{
+		Provider:   "fake",
+		PendingTTL: 15 * time.Minute,
+	})
 	from := inventoryTomorrow()
 	to := from.AddDate(0, 0, 3)
 
@@ -233,6 +236,7 @@ func newInventoryIntegrationService(t *testing.T) (*pgxpool.Pool, *Service) {
 		t.Fatalf("parse integration database URL: %v", err)
 	}
 	poolConfig.ConnConfig.RuntimeParams["search_path"] = schemaName
+	poolConfig.MaxConns = 4
 	pool, err := pgxpool.NewWithConfig(ctx, poolConfig)
 	if err != nil {
 		adminPool.Exec(context.Background(), "DROP SCHEMA "+schemaIdentifier+" CASCADE")

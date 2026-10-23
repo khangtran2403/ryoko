@@ -2,17 +2,20 @@ package payments
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/khangtran2403/ryoko/internal/db/sqlc"
+	notification "github.com/khangtran2403/ryoko/internal/notifications"
 )
 
 func TestWebhookServiceProcessesPaymentSucceededIdempotently(t *testing.T) {
@@ -35,6 +38,7 @@ func TestWebhookServiceProcessesPaymentSucceededIdempotently(t *testing.T) {
 	}
 
 	assertPaymentWebhookState(t, pool, bookingID, paymentID, "confirmed", "succeeded", 1, 1)
+	assertBookingConfirmationEmail(t, pool, bookingID)
 
 	duplicate, err := service.ProcessWebhook(context.Background(), event)
 	if err != nil {
@@ -44,6 +48,7 @@ func TestWebhookServiceProcessesPaymentSucceededIdempotently(t *testing.T) {
 		t.Fatalf("duplicate ProcessWebhook() result = %+v, want duplicate", duplicate)
 	}
 	assertPaymentWebhookState(t, pool, bookingID, paymentID, "confirmed", "succeeded", 1, 1)
+	assertBookingConfirmationEmail(t, pool, bookingID)
 
 	event.ProviderEventID = "evt-success-2"
 	alreadyProcessed, err := service.ProcessWebhook(context.Background(), event)
@@ -54,6 +59,47 @@ func TestWebhookServiceProcessesPaymentSucceededIdempotently(t *testing.T) {
 		t.Fatalf("already-processed result = %+v, want already processed payment %d", alreadyProcessed, paymentID)
 	}
 	assertPaymentWebhookState(t, pool, bookingID, paymentID, "confirmed", "succeeded", 1, 2)
+	assertBookingConfirmationEmail(t, pool, bookingID)
+}
+
+func TestWebhookServiceRollsBackSuccessWhenEmailEnqueueFails(t *testing.T) {
+	pool := newPaymentWebhookIntegrationPool(t)
+	service := NewWebhookService(pool, sqlc.New(pool))
+	bookingID, paymentID, providerPaymentID := insertPaymentWebhookFixture(t, pool, 15*time.Minute)
+
+	if _, err := pool.Exec(
+		context.Background(),
+		"ALTER TABLE email_outbox ADD CONSTRAINT email_outbox_test_reject_all CHECK (false)",
+	); err != nil {
+		t.Fatalf("install rejecting outbox constraint: %v", err)
+	}
+
+	_, err := service.ProcessWebhook(context.Background(), WebhookEvent{
+		Provider:          FakeProvider,
+		ProviderEventID:   "evt-email-enqueue-failure",
+		Type:              PaymentSucceededEvent,
+		ProviderPaymentID: providerPaymentID,
+	})
+	if err == nil {
+		t.Fatal("ProcessWebhook() error = nil, want email enqueue failure")
+	}
+	if !strings.Contains(err.Error(), "enqueue booking confirmation email") {
+		t.Fatalf("ProcessWebhook() error = %v, want email enqueue context", err)
+	}
+
+	assertPaymentWebhookState(t, pool, bookingID, paymentID, "pending_payment", "pending", 0, 0)
+
+	var outboxCount int
+	if err := pool.QueryRow(
+		context.Background(),
+		"SELECT count(*) FROM email_outbox WHERE booking_id = $1",
+		bookingID,
+	).Scan(&outboxCount); err != nil {
+		t.Fatalf("count rolled-back email outbox rows: %v", err)
+	}
+	if outboxCount != 0 {
+		t.Errorf("rolled-back email outbox count = %d, want 0", outboxCount)
+	}
 }
 
 func TestWebhookServiceRecordsIgnoredEvent(t *testing.T) {
@@ -144,6 +190,7 @@ func TestWebhookServiceQueuesRefundForLatePaymentSuccess(t *testing.T) {
 		t.Fatalf("ExpirePendingPayments() = (%d, %v), want (1, nil)", expired, err)
 	}
 	assertPaymentWebhookState(t, pool, bookingID, paymentID, "cancelled", "expired", 1, 0)
+	assertEmailOutboxEvents(t, pool, bookingID, "booking_cancelled")
 
 	event := WebhookEvent{
 		Provider:          FakeProvider,
@@ -177,6 +224,7 @@ func TestWebhookServiceQueuesRefundForLatePaymentSuccess(t *testing.T) {
 	if _, err := queries.MarkPaymentRefunded(context.Background(), paymentID); err != nil {
 		t.Fatalf("mark payment refunded: %v", err)
 	}
+	assertEmailOutboxEvents(t, pool, bookingID, "booking_cancelled", "payment_refunded")
 	event.ProviderEventID = "evt-after-refund"
 	result, err = webhookService.ProcessWebhook(context.Background(), event)
 	if err != nil || !result.AlreadyProcessed {
@@ -205,6 +253,7 @@ func TestWebhookServiceCancelsProviderCanceledPaymentAndReleasesInventory(t *tes
 		t.Fatalf("result = %+v", result)
 	}
 	assertPaymentWebhookState(t, pool, bookingID, paymentID, "cancelled", "expired", 1, 1)
+	assertEmailOutboxEvents(t, pool, bookingID, "booking_cancelled")
 
 	var roomsBooked int32
 	if err := pool.QueryRow(context.Background(), `
@@ -236,6 +285,7 @@ func TestWebhookServiceCancelsProviderCanceledPaymentAndReleasesInventory(t *tes
 		t.Fatalf("repeated cancellation = %+v, %v", repeated, err)
 	}
 	assertPaymentWebhookState(t, pool, bookingID, paymentID, "cancelled", "expired", 1, 2)
+	assertEmailOutboxEvents(t, pool, bookingID, "booking_cancelled")
 }
 
 func TestWebhookServiceRollsBackUnprocessableEvents(t *testing.T) {
@@ -301,6 +351,112 @@ func insertPaymentWebhookFixture(t *testing.T, pool *pgxpool.Pool, expiresIn tim
 	return bookingID, paymentID, providerPaymentID
 }
 
+func assertBookingConfirmationEmail(t *testing.T, pool *pgxpool.Pool, bookingID int64) {
+	t.Helper()
+	ctx := context.Background()
+
+	var count int
+	if err := pool.QueryRow(
+		ctx,
+		"SELECT count(*) FROM email_outbox WHERE booking_id = $1",
+		bookingID,
+	).Scan(&count); err != nil {
+		t.Fatalf("count booking confirmation emails: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("booking confirmation email count = %d, want 1", count)
+	}
+
+	var eventType, recipientEmail, expectedEmail, status string
+	var rawPayload []byte
+	if err := pool.QueryRow(ctx, `
+		SELECT
+			e.event_type,
+			e.recipient_email,
+			e.payload,
+			e.status,
+			u.email
+		FROM email_outbox AS e
+		JOIN bookings AS b ON b.id = e.booking_id
+		JOIN users AS u ON u.id = b.user_id
+		WHERE e.booking_id = $1`, bookingID,
+	).Scan(&eventType, &recipientEmail, &rawPayload, &status, &expectedEmail); err != nil {
+		t.Fatalf("read booking confirmation email: %v", err)
+	}
+	if eventType != notification.BookingConfirmedEvent {
+		t.Errorf("email event type = %q, want %q", eventType, notification.BookingConfirmedEvent)
+	}
+	if recipientEmail != expectedEmail || strings.TrimSpace(recipientEmail) == "" {
+		t.Errorf("email recipient = %q, want booking user email %q", recipientEmail, expectedEmail)
+	}
+	if status != "pending" {
+		t.Errorf("email status = %q, want pending", status)
+	}
+
+	var payload struct {
+		BookingID    int64  `json:"booking_id"`
+		GuestName    string `json:"guest_name"`
+		HotelName    string `json:"hotel_name"`
+		RoomTypeName string `json:"room_type_name"`
+		TotalPrice   string `json:"total_price"`
+		Currency     string `json:"currency"`
+	}
+	if err := json.Unmarshal(rawPayload, &payload); err != nil {
+		t.Fatalf("decode booking confirmation payload: %v", err)
+	}
+	if payload.BookingID != bookingID ||
+		payload.GuestName != "Webhook User" ||
+		payload.HotelName != "Webhook Hotel" ||
+		payload.RoomTypeName != "Webhook Room" ||
+		payload.TotalPrice != "100.00" ||
+		payload.Currency != "VND" {
+		t.Errorf("booking confirmation payload = %+v", payload)
+	}
+}
+
+func assertEmailOutboxEvents(
+	t *testing.T,
+	pool *pgxpool.Pool,
+	bookingID int64,
+	wantEvents ...string,
+) {
+	t.Helper()
+	rows, err := pool.Query(
+		context.Background(),
+		`SELECT event_type, status
+		 FROM email_outbox
+		 WHERE booking_id = $1`,
+		bookingID,
+	)
+	if err != nil {
+		t.Fatalf("query email outbox events: %v", err)
+	}
+	defer rows.Close()
+
+	got := make(map[string]int)
+	for rows.Next() {
+		var eventType, status string
+		if err := rows.Scan(&eventType, &status); err != nil {
+			t.Fatalf("scan email outbox event: %v", err)
+		}
+		if status != "pending" {
+			t.Errorf("email event %q status = %q, want pending", eventType, status)
+		}
+		got[eventType]++
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate email outbox events: %v", err)
+	}
+	if len(got) != len(wantEvents) {
+		t.Fatalf("email events = %v, want %v", got, wantEvents)
+	}
+	for _, want := range wantEvents {
+		if got[want] != 1 {
+			t.Errorf("email event %q count = %d, want 1", want, got[want])
+		}
+	}
+}
+
 func assertPaymentWebhookState(t *testing.T, pool *pgxpool.Pool, bookingID, paymentID int64, wantBooking, wantPayment string, wantHistory, wantEvents int) {
 	t.Helper()
 	var bookingStatus, paymentStatus string
@@ -355,6 +511,7 @@ func newPaymentWebhookIntegrationPool(t *testing.T) *pgxpool.Pool {
 		t.Fatalf("parse integration database URL: %v", err)
 	}
 	config.ConnConfig.RuntimeParams["search_path"] = schemaName
+	config.MaxConns = 4
 	pool, err := pgxpool.NewWithConfig(ctx, config)
 	if err != nil {
 		t.Fatalf("create isolated integration pool: %v", err)

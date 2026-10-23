@@ -255,6 +255,46 @@ func TestOAuthLoginCodeExpires(t *testing.T) {
 	}
 }
 
+func TestOAuthLoginCodeExchangeToleratesApplicationClockBehindDatabase(t *testing.T) {
+	pool, service, issuer := newOAuthIntegrationService(t)
+	loginCode, err := service.CreateGoogleLoginCode(context.Background(), GoogleIdentity{
+		Subject: "clock-skew-subject", Email: "clock-skew@example.com", Name: "Clock Skew User",
+	})
+	if err != nil {
+		t.Fatalf("CreateGoogleLoginCode() error = %v", err)
+	}
+	codeHash := sha256.Sum256([]byte(loginCode.Code))
+
+	var createdAt time.Time
+	if err := pool.QueryRow(
+		context.Background(),
+		"SELECT created_at FROM oauth_login_codes WHERE code_hash = $1",
+		codeHash[:],
+	).Scan(&createdAt); err != nil {
+		t.Fatalf("load OAuth login code creation time: %v", err)
+	}
+	service.now = func() time.Time { return createdAt.Add(-time.Second) }
+
+	if _, err := service.ExchangeLoginCode(context.Background(), loginCode.Code); err != nil {
+		t.Fatalf("ExchangeLoginCode() with clock skew error = %v", err)
+	}
+
+	var consumedAt time.Time
+	if err := pool.QueryRow(
+		context.Background(),
+		"SELECT consumed_at FROM oauth_login_codes WHERE code_hash = $1",
+		codeHash[:],
+	).Scan(&consumedAt); err != nil {
+		t.Fatalf("load OAuth login code consumption time: %v", err)
+	}
+	if consumedAt.Before(createdAt) {
+		t.Errorf("consumed_at = %v, want at or after created_at %v", consumedAt, createdAt)
+	}
+	if calls := issuer.snapshot(); len(calls) != 1 {
+		t.Errorf("issued sessions = %+v, want exactly one", calls)
+	}
+}
+
 func TestConcurrentOAuthLoginCodeExchangeIssuesOneSession(t *testing.T) {
 	_, service, issuer := newOAuthIntegrationService(t)
 	loginCode, err := service.CreateGoogleLoginCode(context.Background(), GoogleIdentity{
@@ -325,6 +365,7 @@ func newOAuthIntegrationService(t *testing.T) (*pgxpool.Pool, *Service, *recordi
 		t.Fatalf("parse integration database URL: %v", err)
 	}
 	poolConfig.ConnConfig.RuntimeParams["search_path"] = schemaName
+	poolConfig.MaxConns = 4
 	pool, err := pgxpool.NewWithConfig(ctx, poolConfig)
 	if err != nil {
 		adminPool.Exec(context.Background(), "DROP SCHEMA "+schemaIdentifier+" CASCADE")

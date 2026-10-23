@@ -12,7 +12,7 @@ import (
 )
 
 type reconciliationQueries interface {
-	ListPaymentsForReconciliation(context.Context,sqlc.ListPaymentsForReconciliationParams) ([]sqlc.Payment, error)
+	ListPaymentsForReconciliation(context.Context, sqlc.ListPaymentsForReconciliationParams) ([]sqlc.Payment, error)
 	TouchPendingPaymentReconciliation(context.Context, int64) (int64, error)
 }
 

@@ -56,6 +56,7 @@ type Config struct {
 		CleanupInterval time.Duration
 	}
 	Payment       PaymentConfig
+	EmailOutbox   EmailOutboxConfig
 	EncryptionKey string
 	Environment   string
 }
@@ -83,6 +84,15 @@ type PaymentConfig struct {
 	FakeWebhookSecret        string
 	StripeSecretKey          string
 	StripeWebhookSecret      string
+}
+
+type EmailOutboxConfig struct {
+	Interval       time.Duration
+	LeaseDuration  time.Duration
+	RunTimeout     time.Duration
+	BatchSize      int32
+	MaxAttempts    int32
+	BaseRetryDelay time.Duration
 }
 
 var cfg *Config
@@ -182,6 +192,36 @@ func Load() (*Config, error) {
 	smtpTimeout, err := getEnvDuration("SMTP_TIMEOUT_SECONDS", 10, "s")
 	if err != nil {
 		return nil, fmt.Errorf("invalid SMTP_TIMEOUT_SECONDS: %w", err)
+	}
+	emailOutboxInterval, err := getEnvDuration("EMAIL_OUTBOX_INTERVAL_SECONDS", 10, "s")
+	if err != nil {
+		return nil, fmt.Errorf("invalid EMAIL_OUTBOX_INTERVAL_SECONDS: %w", err)
+	}
+	emailOutboxLease, err := getEnvDuration("EMAIL_OUTBOX_LEASE_SECONDS", 300, "s")
+	if err != nil {
+		return nil, fmt.Errorf("invalid EMAIL_OUTBOX_LEASE_SECONDS: %w", err)
+	}
+	emailOutboxRunTimeout, err := getEnvDuration("EMAIL_OUTBOX_RUN_TIMEOUT_SECONDS", 240, "s")
+	if err != nil {
+		return nil, fmt.Errorf("invalid EMAIL_OUTBOX_RUN_TIMEOUT_SECONDS: %w", err)
+	}
+	if emailOutboxRunTimeout >= emailOutboxLease {
+		return nil, fmt.Errorf("EMAIL_OUTBOX_RUN_TIMEOUT_SECONDS must be shorter than EMAIL_OUTBOX_LEASE_SECONDS")
+	}
+	emailOutboxBatchSize, err := getEnvInt("EMAIL_OUTBOX_BATCH_SIZE", 20)
+	if err != nil || emailOutboxBatchSize < 1 || emailOutboxBatchSize > 1000 {
+		return nil, fmt.Errorf("invalid EMAIL_OUTBOX_BATCH_SIZE: must be an integer from 1 to 1000")
+	}
+	emailOutboxMaxAttempts, err := getEnvInt("EMAIL_OUTBOX_MAX_ATTEMPTS", 5)
+	if err != nil || emailOutboxMaxAttempts < 1 || emailOutboxMaxAttempts > 100 {
+		return nil, fmt.Errorf("invalid EMAIL_OUTBOX_MAX_ATTEMPTS: must be an integer from 1 to 100")
+	}
+	emailOutboxBaseRetryDelay, err := getEnvDuration("EMAIL_OUTBOX_BASE_RETRY_SECONDS", 60, "s")
+	if err != nil {
+		return nil, fmt.Errorf("invalid EMAIL_OUTBOX_BASE_RETRY_SECONDS: %w", err)
+	}
+	if emailOutboxBaseRetryDelay > 24*time.Hour {
+		return nil, fmt.Errorf("EMAIL_OUTBOX_BASE_RETRY_SECONDS must not exceed 86400 seconds")
 	}
 	googleClientID := strings.TrimSpace(getEnv("GOOGLE_CLIENT_ID", ""))
 	if googleClientID == "" {
@@ -423,6 +463,14 @@ func Load() (*Config, error) {
 			FakeWebhookSecret:        paymentFakeWebhookSecret,
 			StripeSecretKey:          paymentStripeSecretKey,
 			StripeWebhookSecret:      paymentStripeWebhookSecret,
+		},
+		EmailOutbox: EmailOutboxConfig{
+			Interval:       emailOutboxInterval,
+			LeaseDuration:  emailOutboxLease,
+			RunTimeout:     emailOutboxRunTimeout,
+			BatchSize:      int32(emailOutboxBatchSize),
+			MaxAttempts:    int32(emailOutboxMaxAttempts),
+			BaseRetryDelay: emailOutboxBaseRetryDelay,
 		},
 		Environment: environment,
 	}

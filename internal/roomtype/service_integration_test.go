@@ -229,6 +229,7 @@ func newRoomTypeIntegrationService(t *testing.T) (*pgxpool.Pool, *Service) {
 		t.Fatalf("parse integration database URL: %v", err)
 	}
 	poolConfig.ConnConfig.RuntimeParams["search_path"] = schemaName
+	poolConfig.MaxConns = 4
 	pool, err := pgxpool.NewWithConfig(ctx, poolConfig)
 	if err != nil {
 		adminPool.Exec(context.Background(), "DROP SCHEMA "+schemaIdentifier+" CASCADE")

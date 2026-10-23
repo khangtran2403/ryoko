@@ -14,6 +14,7 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/khangtran2403/ryoko/internal/db/sqlc"
+	notification "github.com/khangtran2403/ryoko/internal/notifications"
 )
 
 var (
@@ -477,6 +478,17 @@ func (s *Service) cancelBooking(ctx context.Context, input cancellationInput) (s
 	if lockBooking.Status != "confirmed" {
 		return sqlc.Booking{}, ErrBookingNotCancellable
 	}
+	// Use the same booking -> payment lock order as webhook and expiration
+	// processing. Older confirmed bookings created before payments existed may
+	// legitimately have no payment row and remain cancellable.
+	payment, paymentErr := qtx.GetPaymentByBookingIDForUpdate(ctx, lockBooking.ID)
+	hasPayment := paymentErr == nil
+	if paymentErr != nil && !errors.Is(paymentErr, pgx.ErrNoRows) {
+		return sqlc.Booking{}, fmt.Errorf("lock payment for cancellation: %w", paymentErr)
+	}
+	if hasPayment && payment.Status != "succeeded" {
+		return sqlc.Booking{}, fmt.Errorf("payment invariant violated: confirmed booking payment status is %q", payment.Status)
+	}
 	checkIn := lockBooking.CheckIn
 	checkOut := lockBooking.CheckOut
 	roomsCount := lockBooking.RoomsCount
@@ -540,6 +552,13 @@ func (s *Service) cancelBooking(ctx context.Context, input cancellationInput) (s
 	if err != nil {
 		return sqlc.Booking{}, fmt.Errorf("cancel booking: %w", err)
 	}
+	if hasPayment {
+		if _, err := qtx.MarkPaymentRefundPending(ctx, payment.ID); errors.Is(err, pgx.ErrNoRows) {
+			return sqlc.Booking{}, fmt.Errorf("payment is no longer refundable")
+		} else if err != nil {
+			return sqlc.Booking{}, fmt.Errorf("mark payment refund pending: %w", err)
+		}
+	}
 	_, err = qtx.CreateBookingStatusHistory(ctx, sqlc.CreateBookingStatusHistoryParams{
 		BookingID:       cancel.ID,
 		FromStatus:      pgtype.Text{String: "confirmed", Valid: true},
@@ -552,6 +571,13 @@ func (s *Service) cancelBooking(ctx context.Context, input cancellationInput) (s
 	}
 	if err != nil {
 		return sqlc.Booking{}, fmt.Errorf("create booking status history: %w", err)
+	}
+	_, err = qtx.EnqueueBookingEmail(ctx, sqlc.EnqueueBookingEmailParams{
+		BookingID: cancel.ID,
+		EventType: notification.BookingCancelledEvent,
+	})
+	if err != nil {
+		return sqlc.Booking{}, fmt.Errorf("enqueue booking cancellation email: %w", err)
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return sqlc.Booking{}, fmt.Errorf(

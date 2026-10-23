@@ -10,6 +10,7 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/khangtran2403/ryoko/internal/db/sqlc"
+	notification "github.com/khangtran2403/ryoko/internal/notifications"
 )
 
 const MaxExpirationBatchSize int32 = 1000
@@ -133,6 +134,13 @@ func cancelPendingBookingAndPayment(
 	})
 	if err != nil {
 		return fmt.Errorf("record expiration history: %w", err)
+	}
+	_, err = qtx.EnqueueBookingEmail(ctx, sqlc.EnqueueBookingEmailParams{
+		BookingID: booking.ID,
+		EventType: notification.BookingCancelledEvent,
+	})
+	if err != nil {
+		return fmt.Errorf("enqueue booking cancellation email: %w", err)
 	}
 	return nil
 }

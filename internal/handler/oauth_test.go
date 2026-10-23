@@ -3,6 +3,8 @@ package handler
 import (
 	"context"
 	"errors"
+	"io"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -267,7 +269,7 @@ func TestNewOAuthHandlerRejectsInvalidSuccessRedirect(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, redirectURL := range []string{"", "/auth/callback", "ftp://example.com/callback"} {
-		if _, err := NewOAuthHandler(provider, cookies, service, session.NewRefreshCookieManager(false), redirectURL); err == nil {
+		if _, err := NewOAuthHandler(provider, cookies, service, session.NewRefreshCookieManager(false), redirectURL, nil); err == nil {
 			t.Errorf("NewOAuthHandler(%q) returned nil error", redirectURL)
 		}
 	}
@@ -285,6 +287,7 @@ func newTestOAuthHandler(t *testing.T, provider *fakeGoogleOAuthProvider, servic
 		service,
 		session.NewRefreshCookieManager(false),
 		"https://app.example.test/auth/callback?source=google",
+		log.New(io.Discard, "", 0),
 	)
 	if err != nil {
 		t.Fatalf("NewOAuthHandler() error = %v", err)

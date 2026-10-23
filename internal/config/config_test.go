@@ -89,6 +89,79 @@ func TestLoadPaymentConfig(t *testing.T) {
 	}
 }
 
+func TestLoadEmailOutboxConfig(t *testing.T) {
+	setRequiredSMTPEnv(t)
+	t.Setenv("JWT_SECRET", "test-secret-that-is-at-least-32-bytes-long")
+	t.Setenv("PASSWORD_RESET_PEPPER", "test-password-reset-pepper-at-least-32-bytes-long")
+	t.Setenv("EMAIL_OUTBOX_INTERVAL_SECONDS", "15")
+	t.Setenv("EMAIL_OUTBOX_LEASE_SECONDS", "600")
+	t.Setenv("EMAIL_OUTBOX_RUN_TIMEOUT_SECONDS", "300")
+	t.Setenv("EMAIL_OUTBOX_BATCH_SIZE", "40")
+	t.Setenv("EMAIL_OUTBOX_MAX_ATTEMPTS", "8")
+	t.Setenv("EMAIL_OUTBOX_BASE_RETRY_SECONDS", "120")
+
+	loaded, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if loaded.EmailOutbox.Interval != 15*time.Second {
+		t.Errorf("EmailOutbox.Interval = %v, want 15s", loaded.EmailOutbox.Interval)
+	}
+	if loaded.EmailOutbox.LeaseDuration != 10*time.Minute {
+		t.Errorf("EmailOutbox.LeaseDuration = %v, want 10m", loaded.EmailOutbox.LeaseDuration)
+	}
+	if loaded.EmailOutbox.RunTimeout != 5*time.Minute {
+		t.Errorf("EmailOutbox.RunTimeout = %v, want 5m", loaded.EmailOutbox.RunTimeout)
+	}
+	if loaded.EmailOutbox.BatchSize != 40 {
+		t.Errorf("EmailOutbox.BatchSize = %d, want 40", loaded.EmailOutbox.BatchSize)
+	}
+	if loaded.EmailOutbox.MaxAttempts != 8 {
+		t.Errorf("EmailOutbox.MaxAttempts = %d, want 8", loaded.EmailOutbox.MaxAttempts)
+	}
+	if loaded.EmailOutbox.BaseRetryDelay != 2*time.Minute {
+		t.Errorf("EmailOutbox.BaseRetryDelay = %v, want 2m", loaded.EmailOutbox.BaseRetryDelay)
+	}
+}
+
+func TestLoadRejectsInvalidEmailOutboxConfig(t *testing.T) {
+	tests := []struct {
+		name  string
+		key   string
+		value string
+	}{
+		{name: "zero interval", key: "EMAIL_OUTBOX_INTERVAL_SECONDS", value: "0"},
+		{name: "zero lease", key: "EMAIL_OUTBOX_LEASE_SECONDS", value: "0"},
+		{name: "zero run timeout", key: "EMAIL_OUTBOX_RUN_TIMEOUT_SECONDS", value: "0"},
+		{name: "timeout equals lease", key: "EMAIL_OUTBOX_RUN_TIMEOUT_SECONDS", value: "300"},
+		{name: "invalid batch", key: "EMAIL_OUTBOX_BATCH_SIZE", value: "invalid"},
+		{name: "zero batch", key: "EMAIL_OUTBOX_BATCH_SIZE", value: "0"},
+		{name: "large batch", key: "EMAIL_OUTBOX_BATCH_SIZE", value: "1001"},
+		{name: "invalid attempts", key: "EMAIL_OUTBOX_MAX_ATTEMPTS", value: "invalid"},
+		{name: "zero attempts", key: "EMAIL_OUTBOX_MAX_ATTEMPTS", value: "0"},
+		{name: "many attempts", key: "EMAIL_OUTBOX_MAX_ATTEMPTS", value: "101"},
+		{name: "zero retry delay", key: "EMAIL_OUTBOX_BASE_RETRY_SECONDS", value: "0"},
+		{name: "long retry delay", key: "EMAIL_OUTBOX_BASE_RETRY_SECONDS", value: "86401"},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			setRequiredSMTPEnv(t)
+			t.Setenv("JWT_SECRET", "test-secret-that-is-at-least-32-bytes-long")
+			t.Setenv("PASSWORD_RESET_PEPPER", "test-password-reset-pepper-at-least-32-bytes-long")
+			t.Setenv(test.key, test.value)
+
+			_, err := Load()
+			if err == nil {
+				t.Fatal("Load() returned nil error")
+			}
+			if !strings.Contains(err.Error(), test.key) {
+				t.Errorf("error = %q, want key %q", err, test.key)
+			}
+		})
+	}
+}
+
 func TestLoadStripePaymentConfig(t *testing.T) {
 	setRequiredSMTPEnv(t)
 	t.Setenv("JWT_SECRET", "test-secret-that-is-at-least-32-bytes-long")

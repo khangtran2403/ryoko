@@ -26,7 +26,9 @@ func TestExpirationServiceExpiresBookingAndReleasesInventory(t *testing.T) {
 		t.Fatalf("ExpirePendingPayments() = %d, want 1", expired)
 	}
 	assertPaymentWebhookState(t, pool, expiredBookingID, expiredPaymentID, "cancelled", "expired", 1, 0)
+	assertEmailOutboxEvents(t, pool, expiredBookingID, "booking_cancelled")
 	assertPaymentWebhookState(t, pool, activeBookingID, activePaymentID, "pending_payment", "pending", 0, 0)
+	assertEmailOutboxEvents(t, pool, activeBookingID)
 
 	var roomsBooked int32
 	if err := pool.QueryRow(context.Background(), `
@@ -56,6 +58,7 @@ func TestExpirationServiceExpiresBookingAndReleasesInventory(t *testing.T) {
 	if err != nil || expired != 0 {
 		t.Errorf("second ExpirePendingPayments() = (%d, %v), want (0, nil)", expired, err)
 	}
+	assertEmailOutboxEvents(t, pool, expiredBookingID, "booking_cancelled")
 }
 
 func TestExpirationServiceRollsBackWhenInventoryIsInconsistent(t *testing.T) {

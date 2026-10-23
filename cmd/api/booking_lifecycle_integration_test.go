@@ -1354,6 +1354,7 @@ func newBookingLifecycleServer(
 		oauthService,
 		session.NewRefreshCookieManager(false),
 		lifecycleOrigin+"/auth/callback",
+		log.New(lifecycleTestLogWriter{t: t}, "oauth: ", 0),
 	)
 	if err != nil {
 		t.Fatalf("create test OAuth handler: %v", err)
@@ -1419,7 +1420,7 @@ func newBookingLifecycleServer(
 		oauthHandler:    oauthHandler,
 		passwordResetHandler: handler.NewPasswordResetHandler(
 			passwordResetService,
-			log.New(io.Discard, "", 0),
+			log.New(lifecycleTestLogWriter{t: t}, "password reset: ", 0),
 		),
 		bookingHandler:        handler.NewBookingHandler(diagnosticBookingService),
 		paymentHandler:        handler.NewPaymentHandler(paymentService),
@@ -1435,6 +1436,15 @@ func newBookingLifecycleServer(
 		logger:                logger,
 	})
 	return httptest.NewServer(apiHandler)
+}
+
+type lifecycleTestLogWriter struct {
+	t *testing.T
+}
+
+func (w lifecycleTestLogWriter) Write(message []byte) (int, error) {
+	w.t.Log(strings.TrimSpace(string(message)))
+	return len(message), nil
 }
 
 // bookingLifecycleDiagnosticService preserves the real service behavior while
@@ -1509,6 +1519,7 @@ func newAPIIntegrationPool(t *testing.T) *pgxpool.Pool {
 		t.Fatalf("parse integration database URL: %v", err)
 	}
 	poolConfig.ConnConfig.RuntimeParams["search_path"] = schemaName
+	poolConfig.MaxConns = 4
 	pool, err := pgxpool.NewWithConfig(ctx, poolConfig)
 	if err != nil {
 		_, _ = adminPool.Exec(context.Background(), "DROP SCHEMA "+schemaIdentifier+" CASCADE")

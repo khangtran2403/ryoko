@@ -3,6 +3,7 @@ package handler
 import (
 	"context"
 	"errors"
+	"log"
 	"net/http"
 	"net/url"
 	"strings"
@@ -32,6 +33,7 @@ type OAuthHandler struct {
 	service            oauthAccountService
 	refreshCookies     refreshCookieManager
 	successRedirectURL *url.URL
+	logger             *log.Logger
 }
 
 type ExchangeOAuthCodeRequest struct {
@@ -44,6 +46,7 @@ func NewOAuthHandler(
 	service oauthAccountService,
 	refreshCookies refreshCookieManager,
 	successRedirectURL string,
+	logger *log.Logger,
 ) (*OAuthHandler, error) {
 	redirectURL, err := url.Parse(strings.TrimSpace(successRedirectURL))
 	if err != nil || redirectURL.Scheme == "" || redirectURL.Host == "" {
@@ -52,40 +55,49 @@ func NewOAuthHandler(
 	if redirectURL.Scheme != "http" && redirectURL.Scheme != "https" {
 		return nil, errors.New("OAuth success redirect URL must use http or https")
 	}
+	if logger == nil {
+		logger = log.Default()
+	}
 	return &OAuthHandler{
 		provider:           provider,
 		cookies:            cookies,
 		service:            service,
 		refreshCookies:     refreshCookies,
 		successRedirectURL: redirectURL,
+		logger:             logger,
 	}, nil
 }
 
 func (h *OAuthHandler) StartGoogle(w http.ResponseWriter, r *http.Request) {
 	state, err := appoauth.GenerateState()
 	if err != nil {
+		h.logger.Printf("generate OAuth state: %v", err)
 		http.Error(w, "Failed to start Google authentication", http.StatusInternalServerError)
 		return
 	}
 	verifier, err := appoauth.GeneratePKCEVerifier()
 	if err != nil {
+		h.logger.Printf("generate OAuth PKCE verifier: %v", err)
 		http.Error(w, "Failed to start Google authentication", http.StatusInternalServerError)
 		return
 	}
 	nonce, err := appoauth.GenerateNonce()
 	if err != nil {
+		h.logger.Printf("generate OAuth nonce: %v", err)
 		http.Error(w, "Failed to start Google authentication", http.StatusInternalServerError)
 		return
 	}
 
 	authorizationURL, err := h.provider.AuthorizationURL(state, verifier, nonce)
 	if err != nil {
+		h.logger.Printf("create Google authorization URL: %v", err)
 		http.Error(w, "Failed to start Google authentication", http.StatusInternalServerError)
 		return
 	}
 	if err := h.cookies.Set(w, appoauth.FlowValues{
 		State: state, PKCEVerifier: verifier, Nonce: nonce,
 	}); err != nil {
+		h.logger.Printf("set OAuth flow cookies: %v", err)
 		http.Error(w, "Failed to start Google authentication", http.StatusInternalServerError)
 		return
 	}
@@ -117,6 +129,7 @@ func (h *OAuthHandler) GoogleCallback(w http.ResponseWriter, r *http.Request) {
 	}
 	identity, err := h.provider.ExchangeIdentity(r.Context(), code, flow.PKCEVerifier, flow.Nonce)
 	if err != nil {
+		h.logger.Printf("exchange Google identity: %v", err)
 		http.Error(w, "Google authentication failed", http.StatusUnauthorized)
 		return
 	}
@@ -131,6 +144,7 @@ func (h *OAuthHandler) GoogleCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err != nil {
+		h.logger.Printf("create Google login code: %v", err)
 		http.Error(w, "Failed to complete Google authentication", http.StatusInternalServerError)
 		return
 	}
@@ -165,11 +179,13 @@ func (h *OAuthHandler) ExchangeCode(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err != nil {
+		h.logger.Printf("exchange OAuth login code: %v", err)
 		http.Error(w, "Failed to exchange OAuth login code", http.StatusInternalServerError)
 		return
 	}
 
 	if err := writeSessionResponse(w, pair, h.refreshCookies); err != nil {
+		h.logger.Printf("write OAuth session response: %v", err)
 		http.Error(w, "Failed to create session", http.StatusInternalServerError)
 	}
 }

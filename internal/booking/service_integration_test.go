@@ -295,13 +295,16 @@ func TestCancelBookingRestoresAvailabilityExactlyOnce(t *testing.T) {
 	if cancelled.Status != "cancelled" {
 		t.Errorf("cancelled status = %q, want cancelled", cancelled.Status)
 	}
+	assertPaymentStatusForBooking(t, pool, created.ID, "refund_pending")
 	assertAvailabilityRange(t, pool, roomTypeID, 3, 0, 0)
+	assertBookingEmailEvent(t, pool, created.ID, "booking_cancelled", 1)
 
 	_, err = service.CancelBooking(context.Background(), created.ID, userID)
 	if !errors.Is(err, ErrBookingNotCancellable) {
 		t.Fatalf("second CancelBooking() error = %v, want ErrBookingNotCancellable", err)
 	}
 	assertAvailabilityRange(t, pool, roomTypeID, 3, 0, 0)
+	assertBookingEmailEvent(t, pool, created.ID, "booking_cancelled", 1)
 }
 
 func TestAdminCancellationRestoresAvailabilityAndRecordsAuditActor(t *testing.T) {
@@ -337,7 +340,9 @@ func TestAdminCancellationRestoresAvailabilityAndRecordsAuditActor(t *testing.T)
 	if cancelled.Status != "cancelled" {
 		t.Errorf("cancelled status = %q, want cancelled", cancelled.Status)
 	}
+	assertPaymentStatusForBooking(t, pool, created.ID, "refund_pending")
 	assertAvailabilityRange(t, pool, roomTypeID, 3, 0, 0)
+	assertBookingEmailEvent(t, pool, created.ID, "booking_cancelled", 1)
 
 	var fromStatus string
 	var toStatus string
@@ -896,6 +901,7 @@ func newBookingIntegrationService(t *testing.T) (*pgxpool.Pool, *Service) {
 		t.Fatalf("parse integration database URL: %v", err)
 	}
 	poolConfig.ConnConfig.RuntimeParams["search_path"] = schemaName
+	poolConfig.MaxConns = 4
 
 	pool, err := pgxpool.NewWithConfig(ctx, poolConfig)
 	if err != nil {
@@ -1095,6 +1101,50 @@ func assertBookingStatus(t *testing.T, pool *pgxpool.Pool, bookingID int64, want
 	}
 	if status != want {
 		t.Errorf("booking status = %q, want %q", status, want)
+	}
+}
+
+func assertPaymentStatusForBooking(t *testing.T, pool *pgxpool.Pool, bookingID int64, want string) {
+	t.Helper()
+	var status string
+	if err := pool.QueryRow(context.Background(), "SELECT status FROM payments WHERE booking_id = $1", bookingID).Scan(&status); err != nil {
+		t.Fatalf("query payment status: %v", err)
+	}
+	if status != want {
+		t.Errorf("payment status = %q, want %q", status, want)
+	}
+}
+
+func assertBookingEmailEvent(
+	t *testing.T,
+	pool *pgxpool.Pool,
+	bookingID int64,
+	wantEvent string,
+	wantCount int,
+) {
+	t.Helper()
+	var eventType, status string
+	var count int
+	err := pool.QueryRow(
+		context.Background(),
+		`SELECT event_type, status, count(*) OVER ()
+		 FROM email_outbox
+		 WHERE booking_id = $1 AND event_type = $2`,
+		bookingID,
+		wantEvent,
+	).Scan(&eventType, &status, &count)
+	if err != nil {
+		t.Fatalf("query booking email event: %v", err)
+	}
+	if eventType != wantEvent || status != "pending" || count != wantCount {
+		t.Errorf(
+			"booking email = {event:%q status:%q count:%d}, want {%q pending %d}",
+			eventType,
+			status,
+			count,
+			wantEvent,
+			wantCount,
+		)
 	}
 }
 

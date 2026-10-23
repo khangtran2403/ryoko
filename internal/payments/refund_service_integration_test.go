@@ -2,6 +2,7 @@ package payments
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -58,4 +59,57 @@ func TestRefundServiceRetriesProviderFailureAndMarksRefunded(t *testing.T) {
 	if status != "refunded" || !failureCodeCleared || !failureMessageCleared || !refundedAtPresent {
 		t.Errorf("refunded state = {%q code-cleared:%t message-cleared:%t refunded-at:%t}", status, failureCodeCleared, failureMessageCleared, refundedAtPresent)
 	}
+	assertEmailOutboxEvents(t, pool, bookingID, "payment_refunded")
+}
+
+func TestRefundServiceRollsBackRefundWhenEmailEnqueueFails(t *testing.T) {
+	pool := newPaymentWebhookIntegrationPool(t)
+	bookingID, paymentID, providerPaymentID := insertPaymentWebhookFixture(t, pool, 15*time.Minute)
+	if _, err := pool.Exec(
+		context.Background(),
+		"UPDATE bookings SET status = 'cancelled' WHERE id = $1",
+		bookingID,
+	); err != nil {
+		t.Fatalf("prepare cancelled booking: %v", err)
+	}
+	if _, err := pool.Exec(context.Background(), `
+		UPDATE payments
+		SET status = 'refund_pending', provider_payment_id = $1, paid_at = now()
+		WHERE id = $2`, providerPaymentID, paymentID); err != nil {
+		t.Fatalf("prepare refund-pending payment: %v", err)
+	}
+	if _, err := pool.Exec(
+		context.Background(),
+		`ALTER TABLE email_outbox
+		 ADD CONSTRAINT email_outbox_test_reject_refund
+		 CHECK (event_type <> 'payment_refunded')`,
+	); err != nil {
+		t.Fatalf("install rejecting refund-email constraint: %v", err)
+	}
+
+	service := NewRefundService(
+		sqlc.New(pool),
+		&recordingGateway{provider: FakeProvider},
+		100,
+	)
+	result, err := service.ProcessPendingRefunds(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "finalize payment refund") {
+		t.Fatalf("ProcessPendingRefunds() error = %v, want finalization error", err)
+	}
+	if result != (RefundBatchResult{Attempted: 1, Failed: 1}) {
+		t.Errorf("result = %+v, want failed refund", result)
+	}
+
+	var status string
+	if err := pool.QueryRow(
+		context.Background(),
+		"SELECT status FROM payments WHERE id = $1",
+		paymentID,
+	).Scan(&status); err != nil {
+		t.Fatalf("read rolled-back payment: %v", err)
+	}
+	if status != "refund_pending" {
+		t.Errorf("payment status = %q, want refund_pending", status)
+	}
+	assertEmailOutboxEvents(t, pool, bookingID)
 }

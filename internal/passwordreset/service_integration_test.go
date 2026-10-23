@@ -185,8 +185,8 @@ func TestVerifyPasswordResetOTPReturnsStoredOpaqueToken(t *testing.T) {
 	if string(storedHash) != string(tokenHash[:]) {
 		t.Error("stored reset token hash does not match returned token")
 	}
-	if !verifiedAt.Equal(fixedNow) {
-		t.Errorf("verified at = %v, want %v", verifiedAt, fixedNow)
+	if verifiedAt.Before(fixedNow) {
+		t.Errorf("verified at = %v, want at or after %v", verifiedAt, fixedNow)
 	}
 	if !storedExpiresAt.Equal(wantExpiry) {
 		t.Errorf("stored token expiry = %v, want %v", storedExpiresAt, wantExpiry)
@@ -201,6 +201,48 @@ func TestVerifyPasswordResetOTPReturnsStoredOpaqueToken(t *testing.T) {
 	}
 	if second != (ResetToken{}) {
 		t.Errorf("second verification result = %+v, want empty", second)
+	}
+}
+
+func TestVerifyPasswordResetOTPToleratesApplicationClockBehindDatabase(t *testing.T) {
+	pool, service, sender := newPasswordResetIntegrationService(t)
+	userID := insertPasswordResetUser(t, pool, "clock-skew-reset@example.com")
+	if err := service.RequestPasswordReset(context.Background(), "clock-skew-reset@example.com"); err != nil {
+		t.Fatalf("RequestPasswordReset() error = %v", err)
+	}
+
+	var createdAt time.Time
+	if err := pool.QueryRow(
+		context.Background(),
+		`SELECT created_at
+		 FROM password_reset_requests
+		 WHERE user_id = $1 AND consumed_at IS NULL`,
+		userID,
+	).Scan(&createdAt); err != nil {
+		t.Fatalf("load password reset creation time: %v", err)
+	}
+	service.now = func() time.Time { return createdAt.Add(-time.Second) }
+
+	if _, err := service.VerifyPasswordResetOTP(
+		context.Background(),
+		"clock-skew-reset@example.com",
+		sender.emails[0].OTP,
+	); err != nil {
+		t.Fatalf("VerifyPasswordResetOTP() with clock skew error = %v", err)
+	}
+
+	var verifiedAt time.Time
+	if err := pool.QueryRow(
+		context.Background(),
+		`SELECT verified_at
+		 FROM password_reset_requests
+		 WHERE user_id = $1 AND consumed_at IS NULL`,
+		userID,
+	).Scan(&verifiedAt); err != nil {
+		t.Fatalf("load password reset verification time: %v", err)
+	}
+	if verifiedAt.Before(createdAt) {
+		t.Errorf("verified_at = %v, want at or after created_at %v", verifiedAt, createdAt)
 	}
 }
 
@@ -489,6 +531,7 @@ func newPasswordResetIntegrationService(t *testing.T) (*pgxpool.Pool, *Service, 
 		t.Fatalf("parse integration database URL: %v", err)
 	}
 	poolConfig.ConnConfig.RuntimeParams["search_path"] = schemaName
+	poolConfig.MaxConns = 4
 	pool, err := pgxpool.NewWithConfig(ctx, poolConfig)
 	if err != nil {
 		adminPool.Exec(context.Background(), "DROP SCHEMA "+schemaIdentifier+" CASCADE")

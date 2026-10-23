@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	notification "github.com/khangtran2403/ryoko/internal/notifications"
 	"github.com/khangtran2403/ryoko/internal/passwordreset"
 )
 
@@ -113,5 +114,165 @@ func TestSendPasswordResetOTPValidatesMessageBeforeConnecting(t *testing.T) {
 				t.Fatal("SendPasswordResetOTP() returned nil error")
 			}
 		})
+	}
+}
+
+func TestBuildBookingEmailMessages(t *testing.T) {
+	tests := []struct {
+		eventType   string
+		wantSubject string
+		wantMessage string
+	}{
+		{
+			eventType:   notification.BookingConfirmedEvent,
+			wantSubject: "Your Ryoko booking is confirmed",
+			wantMessage: "Your booking has been confirmed.",
+		},
+		{
+			eventType:   notification.BookingCancelledEvent,
+			wantSubject: "Your Ryoko booking was cancelled",
+			wantMessage: "Your booking has been cancelled.",
+		},
+		{
+			eventType:   notification.PaymentRefundedEvent,
+			wantSubject: "Your Ryoko refund is complete",
+			wantMessage: "Your refund has been completed.",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.eventType, func(t *testing.T) {
+			email := validBookingEmail()
+			email.EventType = test.eventType
+			subject, body, err := bookingEmailContent(email)
+			if err != nil {
+				t.Fatalf("bookingEmailContent() error = %v", err)
+			}
+			if subject != test.wantSubject {
+				t.Errorf("subject = %q, want %q", subject, test.wantSubject)
+			}
+
+			message := string(buildTextMessage(
+				"noreply@example.com",
+				email.To,
+				subject,
+				body,
+			))
+			for _, expected := range []string{
+				"From: noreply@example.com\r\n",
+				"To: guest@example.com\r\n",
+				"Subject: " + test.wantSubject + "\r\n",
+				"Hello Khang Tran,",
+				test.wantMessage,
+				"Booking ID: 42",
+				"Hotel: Ryoko Hotel",
+				"Room type: Deluxe",
+				"Check-in: 2026-11-01",
+				"Check-out: 2026-11-03",
+				"Rooms: 1",
+				"Guests: 2",
+				"Price per night: 1500000.00 VND",
+				"Total: 3000000.00 VND",
+			} {
+				if !strings.Contains(message, expected) {
+					t.Errorf("message does not contain %q:\n%s", expected, message)
+				}
+			}
+		})
+	}
+}
+
+func TestSendBookingEmailValidatesBeforeConnecting(t *testing.T) {
+	sender, err := NewSMTPSender(SMTPConfig{
+		Host: "smtp.invalid", Port: 587, From: "noreply@example.com",
+		RequireTLS: true, Timeout: time.Second,
+	})
+	if err != nil {
+		t.Fatalf("NewSMTPSender() error = %v", err)
+	}
+
+	tests := []struct {
+		name    string
+		mutate  func(*notification.BookingEmail)
+		wantErr string
+	}{
+		{
+			name:    "invalid recipient",
+			mutate:  func(email *notification.BookingEmail) { email.To = "invalid" },
+			wantErr: "invalid booking email recipient",
+		},
+		{
+			name: "recipient header injection",
+			mutate: func(email *notification.BookingEmail) {
+				email.To = "guest@example.com\r\nBcc: attacker@example.com"
+			},
+			wantErr: "invalid booking email recipient",
+		},
+		{
+			name:    "unsupported event",
+			mutate:  func(email *notification.BookingEmail) { email.EventType = "unknown" },
+			wantErr: "unsupported booking email event type",
+		},
+		{
+			name:    "invalid booking ID",
+			mutate:  func(email *notification.BookingEmail) { email.Payload.BookingID = 0 },
+			wantErr: "booking ID must be positive",
+		},
+		{
+			name:    "missing guest name",
+			mutate:  func(email *notification.BookingEmail) { email.Payload.GuestName = " " },
+			wantErr: "guest name is required",
+		},
+		{
+			name:    "invalid check-in",
+			mutate:  func(email *notification.BookingEmail) { email.Payload.CheckIn = "November 1" },
+			wantErr: "check-in must use YYYY-MM-DD",
+		},
+		{
+			name:    "check-out before check-in",
+			mutate:  func(email *notification.BookingEmail) { email.Payload.CheckOut = "2026-10-31" },
+			wantErr: "check-out must use YYYY-MM-DD and follow check-in",
+		},
+		{
+			name:    "invalid rooms",
+			mutate:  func(email *notification.BookingEmail) { email.Payload.RoomsCount = 0 },
+			wantErr: "rooms count must be positive",
+		},
+		{
+			name:    "unsupported currency",
+			mutate:  func(email *notification.BookingEmail) { email.Payload.Currency = "EUR" },
+			wantErr: "currency must be USD or VND",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			email := validBookingEmail()
+			test.mutate(&email)
+			err := sender.SendBookingEmail(context.Background(), email)
+			if err == nil || !strings.Contains(err.Error(), test.wantErr) {
+				t.Fatalf("SendBookingEmail() error = %v, want %q", err, test.wantErr)
+			}
+		})
+	}
+}
+
+func validBookingEmail() notification.BookingEmail {
+	return notification.BookingEmail{
+		To:        "guest@example.com",
+		EventType: notification.BookingConfirmedEvent,
+		Payload: notification.BookingEmailPayload{
+			BookingID:     42,
+			GuestName:     "Khang Tran",
+			HotelName:     "Ryoko Hotel",
+			RoomTypeName:  "Deluxe",
+			CheckIn:       "2026-11-01",
+			CheckOut:      "2026-11-03",
+			RoomsCount:    1,
+			GuestCount:    2,
+			PricePerNight: "1500000.00",
+			TotalPrice:    "3000000.00",
+			Currency:      "VND",
+		},
 	}
 }

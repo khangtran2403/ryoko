@@ -24,9 +24,9 @@ func (f *fakeRefundQueries) ListRefundPendingPayments(_ context.Context, batchSi
 	return f.pending, f.listErr
 }
 
-func (f *fakeRefundQueries) MarkPaymentRefunded(_ context.Context, paymentID int64) (sqlc.Payment, error) {
+func (f *fakeRefundQueries) MarkPaymentRefunded(_ context.Context, paymentID int64) (sqlc.MarkPaymentRefundedRow, error) {
 	f.markedIDs = append(f.markedIDs, paymentID)
-	return sqlc.Payment{ID: paymentID, Status: "refunded"}, f.markErr
+	return sqlc.MarkPaymentRefundedRow{ID: paymentID, Status: "refunded"}, f.markErr
 }
 
 func (f *fakeRefundQueries) RecordPaymentRefundFailure(_ context.Context, arg sqlc.RecordPaymentRefundFailureParams) error {
