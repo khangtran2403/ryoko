@@ -221,7 +221,19 @@ func TestWebhookServiceQueuesRefundForLatePaymentSuccess(t *testing.T) {
 	}
 	assertPaymentWebhookState(t, pool, bookingID, paymentID, "cancelled", "refund_pending", 1, 2)
 
-	if _, err := queries.MarkPaymentRefunded(context.Background(), paymentID); err != nil {
+	claimed, err := queries.ClaimRefundPendingPayments(
+		context.Background(),
+		sqlc.ClaimRefundPendingPaymentsParams{LeaseSeconds: 300, BatchSize: 1},
+	)
+	if err != nil || len(claimed) != 1 || claimed[0].ID != paymentID {
+		t.Fatalf("claim payment for refund finalization = %+v, error = %v", claimed, err)
+	}
+	if _, err := queries.MarkPaymentRefunded(
+		context.Background(),
+		sqlc.MarkPaymentRefundedParams{
+			PaymentID: paymentID, RefundLockedAt: claimed[0].RefundLockedAt,
+		},
+	); err != nil {
 		t.Fatalf("mark payment refunded: %v", err)
 	}
 	assertEmailOutboxEvents(t, pool, bookingID, "booking_cancelled", "payment_refunded")

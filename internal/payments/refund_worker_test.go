@@ -21,6 +21,16 @@ type fakePendingRefundProcessor struct {
 	startedOnce sync.Once
 }
 
+type timeoutObservingRefundProcessor struct {
+	observed chan error
+}
+
+func (p *timeoutObservingRefundProcessor) ProcessPendingRefunds(ctx context.Context) (RefundBatchResult, error) {
+	<-ctx.Done()
+	p.observed <- ctx.Err()
+	return RefundBatchResult{}, ctx.Err()
+}
+
 func (f *fakePendingRefundProcessor) ProcessPendingRefunds(context.Context) (RefundBatchResult, error) {
 	f.mu.Lock()
 	f.calls++
@@ -34,7 +44,7 @@ func (f *fakePendingRefundProcessor) ProcessPendingRefunds(context.Context) (Ref
 func TestRefundWorkerRunsImmediatelyAndStops(t *testing.T) {
 	started := make(chan struct{})
 	service := &fakePendingRefundProcessor{started: started}
-	worker := NewRefundWorker(service, time.Hour, log.New(io.Discard, "", 0))
+	worker := NewRefundWorker(service, time.Hour, time.Minute, log.New(io.Discard, "", 0))
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() { defer close(done); worker.Run(ctx) }()
@@ -74,6 +84,7 @@ func TestRefundWorkerLogsResults(t *testing.T) {
 			worker := NewRefundWorker(
 				&fakePendingRefundProcessor{result: tt.result, err: tt.err},
 				time.Hour,
+				time.Minute,
 				log.New(&output, "", 0),
 			)
 			worker.runOnce(context.Background())
@@ -81,5 +92,24 @@ func TestRefundWorkerLogsResults(t *testing.T) {
 				t.Errorf("log = %q, want substring %q", output.String(), tt.wantLog)
 			}
 		})
+	}
+}
+
+func TestRefundWorkerAppliesRunTimeout(t *testing.T) {
+	observed := make(chan error, 1)
+	worker := NewRefundWorker(
+		&timeoutObservingRefundProcessor{observed: observed},
+		time.Hour,
+		10*time.Millisecond,
+		log.New(io.Discard, "", 0),
+	)
+	worker.runOnce(context.Background())
+	select {
+	case err := <-observed:
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("observed error = %v, want deadline exceeded", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("service did not observe the refund worker timeout")
 	}
 }

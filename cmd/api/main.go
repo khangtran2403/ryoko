@@ -166,6 +166,15 @@ func main() {
 		cfg.EmailOutbox.RunTimeout,
 		log.Default(),
 	)
+	emailOutboxCleanupWorker := notification.NewCleanupWorker(
+		queries,
+		cfg.EmailOutbox.Retention,
+		cfg.EmailOutbox.CleanupInterval,
+		cfg.EmailOutbox.CleanupTimeout,
+		log.Default(),
+	)
+	adminEmailOutboxService := notification.NewAdminService(queries)
+	adminEmailOutboxHandler := handler.NewAdminEmailOutboxHandler(adminEmailOutboxService)
 	authMiddleware := middleware.NewAuthMiddleware(tokenManager)
 	corsMiddleware, err := middleware.NewCORSMiddleware(cfg.CORS.FrontendOrigin)
 	if err != nil {
@@ -192,6 +201,8 @@ func main() {
 	}
 	paymentService := payments.NewService(queries, paymentGateway)
 	paymentHandler := handler.NewPaymentHandler(paymentService)
+	adminPaymentService := payments.NewAdminService(queries)
+	adminPaymentHandler := handler.NewAdminPaymentHandler(adminPaymentService)
 	paymentWebhookService := payments.NewWebhookService(pool, queries)
 	paymentWebhookHandler := handler.NewPaymentWebhookHandler(paymentGateway, paymentWebhookService)
 	paymentExpirationService := payments.NewExpirationService(
@@ -207,11 +218,14 @@ func main() {
 	paymentRefundService := payments.NewRefundService(
 		queries,
 		paymentGateway,
+		cfg.Payment.RefundLeaseDuration,
 		cfg.Payment.RefundBatchSize,
+		cfg.Payment.RefundBaseRetryDelay,
 	)
 	paymentRefundWorker := payments.NewRefundWorker(
 		paymentRefundService,
 		cfg.Payment.RefundInterval,
+		cfg.Payment.RefundRunTimeout,
 		log.Default(),
 	)
 	paymentReconciliationService := payments.NewReconciliationService(
@@ -257,32 +271,34 @@ func main() {
 	addr := ":" + strconv.Itoa(cfg.API.Port)
 
 	apiHandler := newAPIHandler(apiDependencies{
-		healthHandler:         healthHandler,
-		hotelHandler:          hotelHandler,
-		roomTypeHandler:       roomTypeHandler,
-		amenityHandler:        amenityHandler,
-		userHandler:           userHandler,
-		authHandler:           authHandler,
-		oauthHandler:          oauthHandler,
-		passwordResetHandler:  passwordResetHandler,
-		bookingHandler:        bookingHandler,
-		paymentHandler:        paymentHandler,
-		paymentWebhookHandler: paymentWebhookHandler,
-		paymentProvider:       paymentGateway.Provider(),
-		adminBookingHandler:   adminBookingHandler,
-		reviewHandler:         reviewHandler,
-		hotelImageHandler:     hotelImageHandler,
-		inventoryHandler:      inventoryHandler,
-		authMiddleware:        authMiddleware,
-		corsMiddleware:        corsMiddleware,
-		authRateLimiter:       authRateLimiter,
-		logger:                slog.Default(),
+		healthHandler:           healthHandler,
+		hotelHandler:            hotelHandler,
+		roomTypeHandler:         roomTypeHandler,
+		amenityHandler:          amenityHandler,
+		userHandler:             userHandler,
+		authHandler:             authHandler,
+		oauthHandler:            oauthHandler,
+		passwordResetHandler:    passwordResetHandler,
+		bookingHandler:          bookingHandler,
+		paymentHandler:          paymentHandler,
+		paymentWebhookHandler:   paymentWebhookHandler,
+		paymentProvider:         paymentGateway.Provider(),
+		adminBookingHandler:     adminBookingHandler,
+		adminEmailOutboxHandler: adminEmailOutboxHandler,
+		adminPaymentHandler:     adminPaymentHandler,
+		reviewHandler:           reviewHandler,
+		hotelImageHandler:       hotelImageHandler,
+		inventoryHandler:        inventoryHandler,
+		authMiddleware:          authMiddleware,
+		corsMiddleware:          corsMiddleware,
+		authRateLimiter:         authRateLimiter,
+		logger:                  slog.Default(),
 	})
 	server := newHTTPServer(addr, apiHandler)
 
 	var workerWG sync.WaitGroup
 
-	workerWG.Add(8)
+	workerWG.Add(9)
 	go func() {
 		defer workerWG.Done()
 		completionWorker.Run(appCtx)
@@ -314,6 +330,10 @@ func main() {
 	go func() {
 		defer workerWG.Done()
 		emailOutboxWorker.Run(appCtx)
+	}()
+	go func() {
+		defer workerWG.Done()
+		emailOutboxCleanupWorker.Run(appCtx)
 	}()
 
 	serverErrors := make(chan error, 1)

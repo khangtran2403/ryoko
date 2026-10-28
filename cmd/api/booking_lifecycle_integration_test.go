@@ -33,6 +33,7 @@ import (
 	"github.com/khangtran2403/ryoko/internal/db/sqlc"
 	"github.com/khangtran2403/ryoko/internal/handler"
 	"github.com/khangtran2403/ryoko/internal/middleware"
+	"github.com/khangtran2403/ryoko/internal/notifications"
 	appoauth "github.com/khangtran2403/ryoko/internal/oauth"
 	"github.com/khangtran2403/ryoko/internal/passwordreset"
 	"github.com/khangtran2403/ryoko/internal/payments"
@@ -192,6 +193,59 @@ func TestBookingHTTPLifecycleIntegration(t *testing.T) {
 		t.Errorf("payment status = %+v, want succeeded payment for booking %d", paymentStatus, created.ID)
 	}
 
+	adminTokenManager, err := auth.NewTokenManager(
+		lifecycleJWTSecret,
+		lifecycleJWTIssuer,
+		lifecycleJWTAudience,
+		15*time.Minute,
+	)
+	if err != nil {
+		t.Fatalf("create admin token manager: %v", err)
+	}
+	adminToken, err := adminTokenManager.GenerateToken(999, auth.RoleAdmin)
+	if err != nil {
+		t.Fatalf("generate admin token: %v", err)
+	}
+	adminPaymentsURL := fmt.Sprintf(
+		"%s/admin/payments?status=succeeded&provider=fake&booking_id=%d&page=1&page_size=20",
+		server.URL,
+		created.ID,
+	)
+	doAPIRequest(
+		t, client, http.MethodGet, adminPaymentsURL,
+		login.AccessToken, "", nil, http.StatusForbidden,
+	)
+	adminPaymentsBody := doAPIRequest(
+		t, client, http.MethodGet, adminPaymentsURL,
+		adminToken, "", nil, http.StatusOK,
+	)
+	var adminPayments handler.ListAdminPaymentsResponse
+	decodeAPIResponse(t, adminPaymentsBody, &adminPayments)
+	if len(adminPayments.Payments) != 1 || adminPayments.Payments[0].ID != paymentSession.PaymentID ||
+		adminPayments.Payments[0].BookingID != created.ID ||
+		adminPayments.Payments[0].CustomerEmail != "http-booking@example.com" ||
+		adminPayments.Payments[0].HotelID != hotelID ||
+		adminPayments.Payments[0].ProviderPaymentID == nil ||
+		*adminPayments.Payments[0].ProviderPaymentID != paymentSession.ProviderPaymentID {
+		t.Errorf("admin payment list = %+v", adminPayments)
+	}
+
+	adminPaymentBody := doAPIRequest(
+		t, client, http.MethodGet,
+		fmt.Sprintf("%s/admin/payments/%d", server.URL, paymentSession.PaymentID),
+		adminToken, "", nil, http.StatusOK,
+	)
+	var adminPayment handler.AdminPaymentResponse
+	decodeAPIResponse(t, adminPaymentBody, &adminPayment)
+	if adminPayment.ID != paymentSession.PaymentID || adminPayment.Status != "succeeded" ||
+		adminPayment.BookingStatus != "confirmed" || adminPayment.FailureCode != nil {
+		t.Errorf("admin payment detail = %+v", adminPayment)
+	}
+	doAPIRequest(
+		t, client, http.MethodGet, server.URL+"/admin/payments/999999",
+		adminToken, "", nil, http.StatusNotFound,
+	)
+
 	bookingURL := server.URL + "/me/bookings/" + strconv.FormatInt(created.ID, 10)
 	fetchedBody := doAPIRequest(t, client, http.MethodGet, bookingURL, login.AccessToken, "", nil, http.StatusOK)
 	var fetched handler.BookingResponse
@@ -221,6 +275,42 @@ func TestBookingHTTPLifecycleIntegration(t *testing.T) {
 	if paymentStatus.Status != "refund_pending" || paymentStatus.RefundedAt != nil {
 		t.Errorf("payment status after cancellation = %+v, want refund_pending", paymentStatus)
 	}
+	if _, err := pool.Exec(context.Background(), `
+		UPDATE payments
+		SET failure_code = 'refund_provider_error',
+		    failure_message = 'temporary provider outage',
+		    refund_available_at = now() + interval '1 hour'
+		WHERE id = $1`, paymentSession.PaymentID); err != nil {
+		t.Fatalf("prepare failed refund for admin retry: %v", err)
+	}
+	retryRefundURL := fmt.Sprintf(
+		"%s/admin/payments/%d/retry-refund",
+		server.URL,
+		paymentSession.PaymentID,
+	)
+	doAPIRequest(
+		t, client, http.MethodPost, retryRefundURL,
+		login.AccessToken, "", nil, http.StatusForbidden,
+	)
+	retriedRefundBody := doAPIRequest(
+		t, client, http.MethodPost, retryRefundURL,
+		adminToken, "", nil, http.StatusAccepted,
+	)
+	var retriedRefund handler.AdminPaymentResponse
+	decodeAPIResponse(t, retriedRefundBody, &retriedRefund)
+	if retriedRefund.ID != paymentSession.PaymentID || retriedRefund.Status != "refund_pending" ||
+		retriedRefund.FailureCode != nil || retriedRefund.FailureMessage != nil ||
+		retriedRefund.RefundAvailableAt == nil || retriedRefund.RefundLockedAt != nil {
+		t.Errorf("retried refund = %+v", retriedRefund)
+	}
+	doAPIRequest(
+		t, client, http.MethodPost, retryRefundURL,
+		adminToken, "", nil, http.StatusConflict,
+	)
+	doAPIRequest(
+		t, client, http.MethodPost, server.URL+"/admin/payments/999999/retry-refund",
+		adminToken, "", nil, http.StatusNotFound,
+	)
 
 	historyBody := doAPIRequest(
 		t, client, http.MethodGet, bookingURL+"/history",
@@ -473,6 +563,52 @@ func TestAdminBookingHTTPLifecycleIntegration(t *testing.T) {
 	if !cancellation.Reason.Valid || cancellation.Reason.String != cancellationReason {
 		t.Errorf("admin cancellation reason = %+v, want %q", cancellation.Reason, cancellationReason)
 	}
+
+	var failedEmailID int64
+	if err := pool.QueryRow(
+		context.Background(),
+		`UPDATE email_outbox
+		 SET status = 'failed', attempts = 5, last_error = 'SMTP unavailable'
+		 WHERE booking_id = $1 AND event_type = 'booking_cancelled'
+		 RETURNING id`,
+		created.ID,
+	).Scan(&failedEmailID); err != nil {
+		t.Fatalf("prepare failed email outbox message: %v", err)
+	}
+	adminEmailURL := server.URL + "/admin/email-outbox"
+	doAPIRequest(
+		t, client, http.MethodGet, adminEmailURL+"?status=failed",
+		customerLogin.AccessToken, "", nil, http.StatusForbidden,
+	)
+	failedEmailsBody := doAPIRequest(
+		t, client, http.MethodGet, adminEmailURL+"?status=failed&page=1&page_size=20",
+		adminLogin.AccessToken, "", nil, http.StatusOK,
+	)
+	var failedEmails handler.ListAdminEmailOutboxResponse
+	decodeAPIResponse(t, failedEmailsBody, &failedEmails)
+	if len(failedEmails.Emails) != 1 || failedEmails.Emails[0].ID != failedEmailID ||
+		failedEmails.Emails[0].Status != "failed" {
+		t.Errorf("failed email list = %+v, want email %d", failedEmails.Emails, failedEmailID)
+	}
+
+	retryEmailURL := fmt.Sprintf("%s/%d/retry", adminEmailURL, failedEmailID)
+	retriedEmailBody := doAPIRequest(
+		t, client, http.MethodPost, retryEmailURL,
+		adminLogin.AccessToken, "", nil, http.StatusOK,
+	)
+	var retriedEmail handler.AdminEmailOutboxResponse
+	decodeAPIResponse(t, retriedEmailBody, &retriedEmail)
+	if retriedEmail.Status != "pending" || retriedEmail.Attempts != 0 || retriedEmail.LastError != nil {
+		t.Errorf("retried email = %+v, want clean pending state", retriedEmail)
+	}
+	doAPIRequest(
+		t, client, http.MethodPost, retryEmailURL,
+		adminLogin.AccessToken, "", nil, http.StatusConflict,
+	)
+	doAPIRequest(
+		t, client, http.MethodPost, adminEmailURL+"/999999/retry",
+		adminLogin.AccessToken, "", nil, http.StatusNotFound,
+	)
 
 	doAPIRequest(
 		t, client, http.MethodPost, adminCancelURL,
@@ -1422,18 +1558,20 @@ func newBookingLifecycleServer(
 			passwordResetService,
 			log.New(lifecycleTestLogWriter{t: t}, "password reset: ", 0),
 		),
-		bookingHandler:        handler.NewBookingHandler(diagnosticBookingService),
-		paymentHandler:        handler.NewPaymentHandler(paymentService),
-		paymentWebhookHandler: handler.NewPaymentWebhookHandler(paymentGateway, paymentWebhookService),
-		paymentProvider:       payments.FakeProvider,
-		adminBookingHandler:   handler.NewAdminBookingHandler(adminBookingService, diagnosticBookingService),
-		reviewHandler:         handler.NewReviewHandler(reviewService),
-		hotelImageHandler:     new(handler.HotelImageHandler),
-		inventoryHandler:      new(handler.InventoryHandler),
-		authMiddleware:        middleware.NewAuthMiddleware(tokenManager),
-		corsMiddleware:        corsMiddleware,
-		authRateLimiter:       rateLimiter,
-		logger:                logger,
+		bookingHandler:          handler.NewBookingHandler(diagnosticBookingService),
+		paymentHandler:          handler.NewPaymentHandler(paymentService),
+		paymentWebhookHandler:   handler.NewPaymentWebhookHandler(paymentGateway, paymentWebhookService),
+		paymentProvider:         payments.FakeProvider,
+		adminBookingHandler:     handler.NewAdminBookingHandler(adminBookingService, diagnosticBookingService),
+		adminEmailOutboxHandler: handler.NewAdminEmailOutboxHandler(notification.NewAdminService(queries)),
+		adminPaymentHandler:     handler.NewAdminPaymentHandler(payments.NewAdminService(queries)),
+		reviewHandler:           handler.NewReviewHandler(reviewService),
+		hotelImageHandler:       new(handler.HotelImageHandler),
+		inventoryHandler:        new(handler.InventoryHandler),
+		authMiddleware:          middleware.NewAuthMiddleware(tokenManager),
+		corsMiddleware:          corsMiddleware,
+		authRateLimiter:         rateLimiter,
+		logger:                  logger,
 	})
 	return httptest.NewServer(apiHandler)
 }

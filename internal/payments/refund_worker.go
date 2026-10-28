@@ -17,17 +17,25 @@ type RefundWorker struct {
 	logger   *log.Logger
 }
 
-func NewRefundWorker(service pendingRefundProcessor, interval time.Duration, logger *log.Logger) *RefundWorker {
+func NewRefundWorker(
+	service pendingRefundProcessor,
+	interval time.Duration,
+	timeout time.Duration,
+	logger *log.Logger,
+) *RefundWorker {
 	if service == nil {
 		panic("payment refund service must not be nil")
 	}
 	if interval <= 0 {
 		panic("payment refund interval must be positive")
 	}
+	if timeout <= 0 {
+		panic("payment refund timeout must be positive")
+	}
 	if logger == nil {
 		panic("payment refund logger must not be nil")
 	}
-	return &RefundWorker{service: service, interval: interval, timeout: 30 * time.Second, logger: logger}
+	return &RefundWorker{service: service, interval: interval, timeout: timeout, logger: logger}
 }
 
 func (w *RefundWorker) Run(ctx context.Context) {

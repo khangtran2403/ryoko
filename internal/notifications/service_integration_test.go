@@ -237,6 +237,63 @@ func TestServicePostgresIntegration(t *testing.T) {
 			t.Errorf("remaining message count = %d, want 0", count)
 		}
 	})
+
+	t.Run("admin lists and retries failed messages", func(t *testing.T) {
+		if _, err := pool.Exec(context.Background(), "DELETE FROM email_outbox"); err != nil {
+			t.Fatalf("clear email outbox fixtures: %v", err)
+		}
+		oldFailedID := insertNotificationFixture(t, pool, queries, "admin-old-failed@example.com")
+		newFailedID := insertNotificationFixture(t, pool, queries, "admin-new-failed@example.com")
+		pendingID := insertNotificationFixture(t, pool, queries, "admin-pending@example.com")
+		if _, err := pool.Exec(
+			context.Background(),
+			`UPDATE email_outbox
+			 SET status = 'failed', attempts = 5, last_error = 'SMTP unavailable',
+			     created_at = CASE id WHEN $1 THEN now() - interval '2 hours' ELSE now() - interval '1 hour' END
+			 WHERE id IN ($1, $2)`,
+			oldFailedID,
+			newFailedID,
+		); err != nil {
+			t.Fatalf("prepare failed messages: %v", err)
+		}
+
+		adminService := NewAdminService(queries)
+		status := "failed"
+		firstPage, err := adminService.ListEmails(context.Background(), ListAdminEmailsInput{
+			Status: &status, Page: 1, PageSize: 1,
+		})
+		if err != nil {
+			t.Fatalf("list failed messages: %v", err)
+		}
+		if len(firstPage.Emails) != 1 || firstPage.Emails[0].ID != newFailedID || !firstPage.Pagination.HasMore {
+			t.Errorf("first failed page = %+v", firstPage)
+		}
+
+		retried, err := adminService.RetryFailedEmail(context.Background(), newFailedID)
+		if err != nil {
+			t.Fatalf("retry failed message: %v", err)
+		}
+		if retried.Status != "pending" || retried.Attempts != 0 ||
+			retried.LastError.Valid || retried.LockedAt.Valid || retried.SentAt.Valid {
+			t.Errorf("retried message = %+v", retried)
+		}
+
+		remaining, err := adminService.ListEmails(context.Background(), ListAdminEmailsInput{
+			Status: &status, Page: 1, PageSize: 10,
+		})
+		if err != nil {
+			t.Fatalf("list remaining failed messages: %v", err)
+		}
+		if len(remaining.Emails) != 1 || remaining.Emails[0].ID != oldFailedID {
+			t.Errorf("remaining failed messages = %+v", remaining.Emails)
+		}
+		if _, err := adminService.RetryFailedEmail(context.Background(), pendingID); !errors.Is(err, ErrAdminEmailNotFailed) {
+			t.Errorf("retry pending error = %v, want ErrAdminEmailNotFailed", err)
+		}
+		if _, err := adminService.RetryFailedEmail(context.Background(), 999999); !errors.Is(err, ErrAdminEmailNotFound) {
+			t.Errorf("retry missing error = %v, want ErrAdminEmailNotFound", err)
+		}
+	})
 }
 
 type integrationProcessResult struct {

@@ -76,7 +76,10 @@ type PaymentConfig struct {
 	ExpirationInterval       time.Duration
 	ExpirationBatchSize      int32
 	RefundInterval           time.Duration
+	RefundLeaseDuration      time.Duration
+	RefundRunTimeout         time.Duration
 	RefundBatchSize          int32
+	RefundBaseRetryDelay     time.Duration
 	ReconciliationInterval   time.Duration
 	ReconciliationStaleAfter time.Duration
 	ReconciliationBatchSize  int32
@@ -87,12 +90,15 @@ type PaymentConfig struct {
 }
 
 type EmailOutboxConfig struct {
-	Interval       time.Duration
-	LeaseDuration  time.Duration
-	RunTimeout     time.Duration
-	BatchSize      int32
-	MaxAttempts    int32
-	BaseRetryDelay time.Duration
+	Interval        time.Duration
+	LeaseDuration   time.Duration
+	RunTimeout      time.Duration
+	BatchSize       int32
+	MaxAttempts     int32
+	BaseRetryDelay  time.Duration
+	Retention       time.Duration
+	CleanupInterval time.Duration
+	CleanupTimeout  time.Duration
 }
 
 var cfg *Config
@@ -223,6 +229,19 @@ func Load() (*Config, error) {
 	if emailOutboxBaseRetryDelay > 24*time.Hour {
 		return nil, fmt.Errorf("EMAIL_OUTBOX_BASE_RETRY_SECONDS must not exceed 86400 seconds")
 	}
+	emailOutboxRetentionDays, err := getEnvInt("EMAIL_OUTBOX_RETENTION_DAYS", 30)
+	if err != nil || emailOutboxRetentionDays < 1 || emailOutboxRetentionDays > 3650 {
+		return nil, fmt.Errorf("invalid EMAIL_OUTBOX_RETENTION_DAYS: must be an integer from 1 to 3650")
+	}
+	emailOutboxRetention := time.Duration(emailOutboxRetentionDays) * 24 * time.Hour
+	emailOutboxCleanupInterval, err := getEnvDuration("EMAIL_OUTBOX_CLEANUP_INTERVAL_HOURS", 24, "h")
+	if err != nil {
+		return nil, fmt.Errorf("invalid EMAIL_OUTBOX_CLEANUP_INTERVAL_HOURS: %w", err)
+	}
+	emailOutboxCleanupTimeout, err := getEnvDuration("EMAIL_OUTBOX_CLEANUP_TIMEOUT_SECONDS", 30, "s")
+	if err != nil {
+		return nil, fmt.Errorf("invalid EMAIL_OUTBOX_CLEANUP_TIMEOUT_SECONDS: %w", err)
+	}
 	googleClientID := strings.TrimSpace(getEnv("GOOGLE_CLIENT_ID", ""))
 	if googleClientID == "" {
 		return nil, fmt.Errorf("GOOGLE_CLIENT_ID is required")
@@ -294,9 +313,27 @@ func Load() (*Config, error) {
 	if err != nil {
 		return nil, fmt.Errorf("invalid PAYMENT_REFUND_INTERVAL_SECONDS: %w", err)
 	}
+	paymentRefundLeaseDuration, err := getEnvDuration("PAYMENT_REFUND_LEASE_SECONDS", 300, "s")
+	if err != nil {
+		return nil, fmt.Errorf("invalid PAYMENT_REFUND_LEASE_SECONDS: %w", err)
+	}
+	paymentRefundRunTimeout, err := getEnvDuration("PAYMENT_REFUND_RUN_TIMEOUT_SECONDS", 240, "s")
+	if err != nil {
+		return nil, fmt.Errorf("invalid PAYMENT_REFUND_RUN_TIMEOUT_SECONDS: %w", err)
+	}
+	if paymentRefundRunTimeout >= paymentRefundLeaseDuration {
+		return nil, fmt.Errorf("PAYMENT_REFUND_RUN_TIMEOUT_SECONDS must be shorter than PAYMENT_REFUND_LEASE_SECONDS")
+	}
 	paymentRefundBatchSize, err := getEnvInt("PAYMENT_REFUND_BATCH_SIZE", 100)
 	if err != nil || paymentRefundBatchSize < 1 || paymentRefundBatchSize > 1000 {
 		return nil, fmt.Errorf("invalid PAYMENT_REFUND_BATCH_SIZE: must be an integer from 1 to 1000")
+	}
+	paymentRefundBaseRetryDelay, err := getEnvDuration("PAYMENT_REFUND_BASE_RETRY_SECONDS", 60, "s")
+	if err != nil {
+		return nil, fmt.Errorf("invalid PAYMENT_REFUND_BASE_RETRY_SECONDS: %w", err)
+	}
+	if paymentRefundBaseRetryDelay > 24*time.Hour {
+		return nil, fmt.Errorf("PAYMENT_REFUND_BASE_RETRY_SECONDS must not exceed 86400 seconds")
 	}
 	paymentReconciliationInterval, err := getEnvDuration(
 		"PAYMENT_RECONCILIATION_INTERVAL_SECONDS",
@@ -455,7 +492,10 @@ func Load() (*Config, error) {
 			ExpirationInterval:       paymentExpirationInterval,
 			ExpirationBatchSize:      int32(paymentExpirationBatchSize),
 			RefundInterval:           paymentRefundInterval,
+			RefundLeaseDuration:      paymentRefundLeaseDuration,
+			RefundRunTimeout:         paymentRefundRunTimeout,
 			RefundBatchSize:          int32(paymentRefundBatchSize),
+			RefundBaseRetryDelay:     paymentRefundBaseRetryDelay,
 			ReconciliationInterval:   paymentReconciliationInterval,
 			ReconciliationStaleAfter: paymentReconciliationStaleAfter,
 			ReconciliationBatchSize:  int32(paymentReconciliationBatchSize),
@@ -465,12 +505,15 @@ func Load() (*Config, error) {
 			StripeWebhookSecret:      paymentStripeWebhookSecret,
 		},
 		EmailOutbox: EmailOutboxConfig{
-			Interval:       emailOutboxInterval,
-			LeaseDuration:  emailOutboxLease,
-			RunTimeout:     emailOutboxRunTimeout,
-			BatchSize:      int32(emailOutboxBatchSize),
-			MaxAttempts:    int32(emailOutboxMaxAttempts),
-			BaseRetryDelay: emailOutboxBaseRetryDelay,
+			Interval:        emailOutboxInterval,
+			LeaseDuration:   emailOutboxLease,
+			RunTimeout:      emailOutboxRunTimeout,
+			BatchSize:       int32(emailOutboxBatchSize),
+			MaxAttempts:     int32(emailOutboxMaxAttempts),
+			BaseRetryDelay:  emailOutboxBaseRetryDelay,
+			Retention:       emailOutboxRetention,
+			CleanupInterval: emailOutboxCleanupInterval,
+			CleanupTimeout:  emailOutboxCleanupTimeout,
 		},
 		Environment: environment,
 	}

@@ -937,6 +937,126 @@ paths:
         '413': {$ref: '#/components/responses/BodyTooLarge'}
         '415': {$ref: '#/components/responses/UnsupportedMediaType'}
         '500': {$ref: '#/components/responses/InternalError'}
+  /admin/email-outbox:
+    get:
+      tags: [Administration]
+      operationId: listEmailOutboxForAdmin
+      summary: List transactional email outbox messages
+      security: [{bearerAuth: []}]
+      parameters:
+        - name: status
+          in: query
+          schema: {$ref: '#/components/schemas/EmailOutboxStatus'}
+        - {$ref: '#/components/parameters/Page'}
+        - {$ref: '#/components/parameters/PageSize'}
+      responses:
+        '200':
+          description: Email outbox messages ordered newest first
+          content: {application/json: {schema: {$ref: '#/components/schemas/AdminEmailOutboxList'}}}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '500': {$ref: '#/components/responses/InternalError'}
+  /admin/email-outbox/{emailID}/retry:
+    parameters:
+      - {$ref: '#/components/parameters/EmailOutboxID'}
+    post:
+      tags: [Administration]
+      operationId: retryFailedEmailOutboxMessage
+      summary: Requeue a failed transactional email
+      security: [{bearerAuth: []}]
+      responses:
+        '200':
+          description: Email requeued for delivery
+          content: {application/json: {schema: {$ref: '#/components/schemas/AdminEmailOutboxMessage'}}}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '500': {$ref: '#/components/responses/InternalError'}
+  /admin/payments:
+    get:
+      tags: [Administration, Payments]
+      operationId: listPaymentsForAdmin
+      summary: List payments with booking and customer context
+      security: [{bearerAuth: []}]
+      parameters:
+        - name: status
+          in: query
+          schema: {$ref: '#/components/schemas/PaymentState'}
+        - name: provider
+          in: query
+          schema: {type: string, minLength: 1, maxLength: 100}
+        - name: booking_id
+          in: query
+          schema: {type: integer, format: int64, minimum: 1}
+        - {$ref: '#/components/parameters/Page'}
+        - {$ref: '#/components/parameters/PageSize'}
+      responses:
+        '200':
+          description: Payments ordered newest first
+          content: {application/json: {schema: {$ref: '#/components/schemas/AdminPaymentList'}}}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '500': {$ref: '#/components/responses/InternalError'}
+  /admin/payments/{paymentID}:
+    parameters:
+      - {$ref: '#/components/parameters/PaymentID'}
+    get:
+      tags: [Administration, Payments]
+      operationId: getPaymentForAdmin
+      summary: Get a payment with booking and customer context
+      security: [{bearerAuth: []}]
+      responses:
+        '200':
+          description: Payment details
+          content: {application/json: {schema: {$ref: '#/components/schemas/AdminPayment'}}}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '500': {$ref: '#/components/responses/InternalError'}
+  /admin/payments/{paymentID}/retry-refund:
+    parameters:
+      - {$ref: '#/components/parameters/PaymentID'}
+    post:
+      tags: [Administration, Payments]
+      operationId: retryFailedPaymentRefundForAdmin
+      summary: Requeue a failed refund for immediate worker processing
+      description: Does not call the payment provider directly and never steals an active refund lease.
+      security: [{bearerAuth: []}]
+      responses:
+        '202':
+          description: Refund requeued for asynchronous processing
+          content: {application/json: {schema: {$ref: '#/components/schemas/AdminPayment'}}}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '500': {$ref: '#/components/responses/InternalError'}
+  /admin/payments/{paymentID}/refund-attempts:
+    parameters:
+      - {$ref: '#/components/parameters/PaymentID'}
+    get:
+      tags: [Administration, Payments]
+      operationId: listPaymentRefundAttemptsForAdmin
+      summary: List the audit history of refund processing attempts
+      security: [{bearerAuth: []}]
+      parameters:
+        - {$ref: '#/components/parameters/Page'}
+        - {$ref: '#/components/parameters/PageSize'}
+      responses:
+        '200':
+          description: Refund attempts ordered by attempt number, newest first
+          content: {application/json: {schema: {$ref: '#/components/schemas/AdminRefundAttemptList'}}}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '500': {$ref: '#/components/responses/InternalError'}
   /admin/room-types/{roomTypeID}/blocked-inventory:
     parameters:
       - {$ref: '#/components/parameters/RoomTypeID'}
@@ -1033,6 +1153,16 @@ components:
       schema: {type: integer, format: int64, minimum: 1}
     ReviewID:
       name: reviewID
+      in: path
+      required: true
+      schema: {type: integer, format: int64, minimum: 1}
+    EmailOutboxID:
+      name: emailID
+      in: path
+      required: true
+      schema: {type: integer, format: int64, minimum: 1}
+    PaymentID:
+      name: paymentID
       in: path
       required: true
       schema: {type: integer, format: int64, minimum: 1}
@@ -1401,6 +1531,7 @@ components:
         refunded_at: {type: [string, 'null'], format: date-time}
         retryable: {type: boolean}
         failure_code: {type: [string, 'null'], enum: [payment_failed, null]}
+    PaymentState: {type: string, enum: [pending, succeeded, expired, refund_pending, refunded]}
     FakePaymentWebhookEvent:
       type: object
       additionalProperties: false
@@ -1467,6 +1598,79 @@ components:
       required: [reason]
       additionalProperties: false
       properties: {reason: {type: string, minLength: 1}}
+    EmailOutboxStatus: {type: string, enum: [pending, processing, sent, failed]}
+    AdminEmailOutboxMessage:
+      type: object
+      required: [id, booking_id, event_type, recipient_email, status, attempts, available_at, created_at, updated_at]
+      properties:
+        id: {type: integer, format: int64}
+        booking_id: {type: integer, format: int64}
+        event_type: {type: string, enum: [booking_confirmed, booking_cancelled, payment_refunded]}
+        recipient_email: {type: string, format: email}
+        status: {$ref: '#/components/schemas/EmailOutboxStatus'}
+        attempts: {type: integer, format: int32, minimum: 0}
+        available_at: {type: string, format: date-time}
+        locked_at: {type: [string, 'null'], format: date-time}
+        sent_at: {type: [string, 'null'], format: date-time}
+        last_error: {type: [string, 'null']}
+        created_at: {type: string, format: date-time}
+        updated_at: {type: string, format: date-time}
+    AdminEmailOutboxList:
+      type: object
+      required: [emails, pagination]
+      properties:
+        emails: {type: array, items: {$ref: '#/components/schemas/AdminEmailOutboxMessage'}}
+        pagination: {$ref: '#/components/schemas/Pagination'}
+    AdminPayment:
+      type: object
+      required: [id, booking_id, booking_status, customer_id, customer_name, customer_email, hotel_id, hotel_name, provider, provider_payment_id, amount_minor, currency, status, failure_code, failure_message, paid_at, refunded_at, refund_attempts, refund_available_at, refund_locked_at, created_at, updated_at]
+      properties:
+        id: {type: integer, format: int64, minimum: 1}
+        booking_id: {type: integer, format: int64, minimum: 1}
+        booking_status: {$ref: '#/components/schemas/BookingStatus'}
+        customer_id: {type: integer, format: int64, minimum: 1}
+        customer_name: {type: string}
+        customer_email: {type: string, format: email}
+        hotel_id: {type: integer, format: int64, minimum: 1}
+        hotel_name: {type: string}
+        provider: {type: string, minLength: 1}
+        provider_payment_id: {type: [string, 'null']}
+        amount_minor: {type: integer, format: int64, minimum: 1}
+        currency: {type: string, enum: [USD, VND]}
+        status: {$ref: '#/components/schemas/PaymentState'}
+        failure_code: {type: [string, 'null']}
+        failure_message: {type: [string, 'null']}
+        paid_at: {type: [string, 'null'], format: date-time}
+        refunded_at: {type: [string, 'null'], format: date-time}
+        refund_attempts: {type: integer, format: int32, minimum: 0}
+        refund_available_at: {type: [string, 'null'], format: date-time}
+        refund_locked_at: {type: [string, 'null'], format: date-time}
+        created_at: {type: string, format: date-time}
+        updated_at: {type: string, format: date-time}
+    AdminPaymentList:
+      type: object
+      required: [payments, pagination]
+      properties:
+        payments: {type: array, items: {$ref: '#/components/schemas/AdminPayment'}}
+        pagination: {$ref: '#/components/schemas/Pagination'}
+    AdminRefundAttempt:
+      type: object
+      required: [id, payment_id, attempt_number, status, failure_code, failure_message, started_at, completed_at]
+      properties:
+        id: {type: integer, format: int64, minimum: 1}
+        payment_id: {type: integer, format: int64, minimum: 1}
+        attempt_number: {type: integer, format: int32, minimum: 1}
+        status: {type: string, enum: [failed, succeeded]}
+        failure_code: {type: [string, 'null']}
+        failure_message: {type: [string, 'null']}
+        started_at: {type: string, format: date-time}
+        completed_at: {type: string, format: date-time}
+    AdminRefundAttemptList:
+      type: object
+      required: [attempts, pagination]
+      properties:
+        attempts: {type: array, items: {$ref: '#/components/schemas/AdminRefundAttempt'}}
+        pagination: {$ref: '#/components/schemas/Pagination'}
     ReviewRequest:
       type: object
       required: [rating]

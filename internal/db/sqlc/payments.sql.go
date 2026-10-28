@@ -50,6 +50,91 @@ func (q *Queries) ClaimPaymentWebhookEvent(ctx context.Context, arg ClaimPayment
 	return i, err
 }
 
+const claimRefundPendingPayments = `-- name: ClaimRefundPendingPayments :many
+WITH claimable AS (
+    SELECT id
+    FROM payments
+    WHERE status = 'refund_pending'
+      AND refund_available_at <= now()
+      AND (
+          refund_locked_at IS NULL
+          OR refund_locked_at <= now()
+              - make_interval(secs => $1::int)
+      )
+    ORDER BY refund_available_at, id
+    FOR UPDATE SKIP LOCKED
+    LIMIT $2::int
+)
+UPDATE payments AS p
+SET
+    refund_attempts = p.refund_attempts + 1,
+    refund_locked_at = now(),
+    updated_at = now()
+FROM claimable AS c
+WHERE p.id = c.id
+RETURNING
+    p.id,
+    p.booking_id,
+    p.provider,
+    p.provider_payment_id,
+    p.provider_idempotency_key,
+    p.amount_minor,
+    p.currency,
+    p.status,
+    p.failure_code,
+    p.failure_message,
+    p.paid_at,
+    p.refunded_at,
+    p.created_at,
+    p.updated_at,
+    p.refund_attempts,
+    p.refund_available_at,
+    p.refund_locked_at
+`
+
+type ClaimRefundPendingPaymentsParams struct {
+	LeaseSeconds int32 `json:"lease_seconds"`
+	BatchSize    int32 `json:"batch_size"`
+}
+
+func (q *Queries) ClaimRefundPendingPayments(ctx context.Context, arg ClaimRefundPendingPaymentsParams) ([]Payment, error) {
+	rows, err := q.db.Query(ctx, claimRefundPendingPayments, arg.LeaseSeconds, arg.BatchSize)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []Payment
+	for rows.Next() {
+		var i Payment
+		if err := rows.Scan(
+			&i.ID,
+			&i.BookingID,
+			&i.Provider,
+			&i.ProviderPaymentID,
+			&i.ProviderIdempotencyKey,
+			&i.AmountMinor,
+			&i.Currency,
+			&i.Status,
+			&i.FailureCode,
+			&i.FailureMessage,
+			&i.PaidAt,
+			&i.RefundedAt,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+			&i.RefundAttempts,
+			&i.RefundAvailableAt,
+			&i.RefundLockedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const createPaymentForBooking = `-- name: CreatePaymentForBooking :one
 INSERT INTO payments (
     booking_id,
@@ -90,7 +175,10 @@ RETURNING
     paid_at,
     refunded_at,
     created_at,
-    updated_at
+    updated_at,
+    refund_attempts,
+    refund_available_at,
+    refund_locked_at
 `
 
 type CreatePaymentForBookingParams struct {
@@ -123,6 +211,9 @@ func (q *Queries) CreatePaymentForBooking(ctx context.Context, arg CreatePayment
 		&i.RefundedAt,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.RefundAttempts,
+		&i.RefundAvailableAt,
+		&i.RefundLockedAt,
 	)
 	return i, err
 }
@@ -142,7 +233,10 @@ SELECT
     p.paid_at,
     p.refunded_at,
     p.created_at,
-    p.updated_at
+    p.updated_at,
+    p.refund_attempts,
+    p.refund_available_at,
+    p.refund_locked_at
 FROM payments AS p
 JOIN bookings AS b
     ON b.id = p.booking_id
@@ -176,6 +270,9 @@ func (q *Queries) GetInitiatablePaymentForUser(ctx context.Context, arg GetIniti
 		&i.RefundedAt,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.RefundAttempts,
+		&i.RefundAvailableAt,
+		&i.RefundLockedAt,
 	)
 	return i, err
 }
@@ -195,7 +292,10 @@ SELECT
     paid_at,
     refunded_at,
     created_at,
-    updated_at
+    updated_at,
+    refund_attempts,
+    refund_available_at,
+    refund_locked_at
 FROM payments
 WHERE booking_id = $1
 `
@@ -218,6 +318,9 @@ func (q *Queries) GetPaymentByBookingID(ctx context.Context, bookingID int64) (P
 		&i.RefundedAt,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.RefundAttempts,
+		&i.RefundAvailableAt,
+		&i.RefundLockedAt,
 	)
 	return i, err
 }
@@ -237,7 +340,10 @@ SELECT
     paid_at,
     refunded_at,
     created_at,
-    updated_at
+    updated_at,
+    refund_attempts,
+    refund_available_at,
+    refund_locked_at
 FROM payments
 WHERE booking_id = $1
 FOR UPDATE
@@ -261,6 +367,9 @@ func (q *Queries) GetPaymentByBookingIDForUpdate(ctx context.Context, bookingID 
 		&i.RefundedAt,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.RefundAttempts,
+		&i.RefundAvailableAt,
+		&i.RefundLockedAt,
 	)
 	return i, err
 }
@@ -280,7 +389,10 @@ SELECT
     p.paid_at,
     p.refunded_at,
     p.created_at,
-    p.updated_at
+    p.updated_at,
+    p.refund_attempts,
+    p.refund_available_at,
+    p.refund_locked_at
 FROM payments AS p
 JOIN bookings AS b
     ON b.id = p.booking_id
@@ -311,6 +423,9 @@ func (q *Queries) GetPaymentByBookingIDForUser(ctx context.Context, arg GetPayme
 		&i.RefundedAt,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.RefundAttempts,
+		&i.RefundAvailableAt,
+		&i.RefundLockedAt,
 	)
 	return i, err
 }
@@ -330,7 +445,10 @@ SELECT
     paid_at,
     refunded_at,
     created_at,
-    updated_at
+    updated_at,
+    refund_attempts,
+    refund_available_at,
+    refund_locked_at
 FROM payments
 WHERE provider = $1
   AND provider_payment_id = $2
@@ -359,6 +477,9 @@ func (q *Queries) GetPaymentByProviderID(ctx context.Context, arg GetPaymentByPr
 		&i.RefundedAt,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.RefundAttempts,
+		&i.RefundAvailableAt,
+		&i.RefundLockedAt,
 	)
 	return i, err
 }
@@ -378,7 +499,10 @@ SELECT
     paid_at,
     refunded_at,
     created_at,
-    updated_at
+    updated_at,
+    refund_attempts,
+    refund_available_at,
+    refund_locked_at
 FROM payments
 WHERE provider = $1
   AND provider_payment_id = $2
@@ -408,8 +532,286 @@ func (q *Queries) GetPaymentByProviderIDForUpdate(ctx context.Context, arg GetPa
 		&i.RefundedAt,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.RefundAttempts,
+		&i.RefundAvailableAt,
+		&i.RefundLockedAt,
 	)
 	return i, err
+}
+
+const getPaymentForAdmin = `-- name: GetPaymentForAdmin :one
+SELECT
+    p.id,
+    p.booking_id,
+    b.status AS booking_status,
+    u.id AS customer_id,
+    u.full_name AS customer_name,
+    u.email AS customer_email,
+    h.id AS hotel_id,
+    h.name AS hotel_name,
+    p.provider,
+    p.provider_payment_id,
+    p.amount_minor,
+    p.currency,
+    p.status,
+    p.failure_code,
+    p.failure_message,
+    p.paid_at,
+    p.refunded_at,
+    p.created_at,
+    p.updated_at,
+    p.refund_attempts,
+    p.refund_available_at,
+    p.refund_locked_at
+FROM payments AS p
+JOIN bookings AS b
+    ON b.id = p.booking_id
+JOIN users AS u
+    ON u.id = b.user_id
+JOIN room_types AS rt
+    ON rt.id = b.room_type_id
+JOIN hotels AS h
+    ON h.id = rt.hotel_id
+WHERE p.id = $1
+`
+
+type GetPaymentForAdminRow struct {
+	ID                int64              `json:"id"`
+	BookingID         int64              `json:"booking_id"`
+	BookingStatus     string             `json:"booking_status"`
+	CustomerID        int64              `json:"customer_id"`
+	CustomerName      string             `json:"customer_name"`
+	CustomerEmail     string             `json:"customer_email"`
+	HotelID           int64              `json:"hotel_id"`
+	HotelName         string             `json:"hotel_name"`
+	Provider          string             `json:"provider"`
+	ProviderPaymentID pgtype.Text        `json:"provider_payment_id"`
+	AmountMinor       int64              `json:"amount_minor"`
+	Currency          string             `json:"currency"`
+	Status            string             `json:"status"`
+	FailureCode       pgtype.Text        `json:"failure_code"`
+	FailureMessage    pgtype.Text        `json:"failure_message"`
+	PaidAt            pgtype.Timestamptz `json:"paid_at"`
+	RefundedAt        pgtype.Timestamptz `json:"refunded_at"`
+	CreatedAt         pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt         pgtype.Timestamptz `json:"updated_at"`
+	RefundAttempts    int32              `json:"refund_attempts"`
+	RefundAvailableAt pgtype.Timestamptz `json:"refund_available_at"`
+	RefundLockedAt    pgtype.Timestamptz `json:"refund_locked_at"`
+}
+
+func (q *Queries) GetPaymentForAdmin(ctx context.Context, paymentID int64) (GetPaymentForAdminRow, error) {
+	row := q.db.QueryRow(ctx, getPaymentForAdmin, paymentID)
+	var i GetPaymentForAdminRow
+	err := row.Scan(
+		&i.ID,
+		&i.BookingID,
+		&i.BookingStatus,
+		&i.CustomerID,
+		&i.CustomerName,
+		&i.CustomerEmail,
+		&i.HotelID,
+		&i.HotelName,
+		&i.Provider,
+		&i.ProviderPaymentID,
+		&i.AmountMinor,
+		&i.Currency,
+		&i.Status,
+		&i.FailureCode,
+		&i.FailureMessage,
+		&i.PaidAt,
+		&i.RefundedAt,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.RefundAttempts,
+		&i.RefundAvailableAt,
+		&i.RefundLockedAt,
+	)
+	return i, err
+}
+
+const listPaymentRefundAttemptsForAdmin = `-- name: ListPaymentRefundAttemptsForAdmin :many
+SELECT
+    id,
+    payment_id,
+    attempt_number,
+    status,
+    failure_code,
+    failure_message,
+    started_at,
+    completed_at
+FROM payment_refund_attempts
+WHERE payment_id = $1
+ORDER BY attempt_number DESC
+OFFSET $2::bigint
+LIMIT $3::int
+`
+
+type ListPaymentRefundAttemptsForAdminParams struct {
+	PaymentID    int64 `json:"payment_id"`
+	ResultOffset int64 `json:"result_offset"`
+	ResultLimit  int32 `json:"result_limit"`
+}
+
+func (q *Queries) ListPaymentRefundAttemptsForAdmin(ctx context.Context, arg ListPaymentRefundAttemptsForAdminParams) ([]PaymentRefundAttempt, error) {
+	rows, err := q.db.Query(ctx, listPaymentRefundAttemptsForAdmin, arg.PaymentID, arg.ResultOffset, arg.ResultLimit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []PaymentRefundAttempt
+	for rows.Next() {
+		var i PaymentRefundAttempt
+		if err := rows.Scan(
+			&i.ID,
+			&i.PaymentID,
+			&i.AttemptNumber,
+			&i.Status,
+			&i.FailureCode,
+			&i.FailureMessage,
+			&i.StartedAt,
+			&i.CompletedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listPaymentsForAdmin = `-- name: ListPaymentsForAdmin :many
+SELECT
+    p.id,
+    p.booking_id,
+    b.status AS booking_status,
+    u.id AS customer_id,
+    u.full_name AS customer_name,
+    u.email AS customer_email,
+    h.id AS hotel_id,
+    h.name AS hotel_name,
+    p.provider,
+    p.provider_payment_id,
+    p.amount_minor,
+    p.currency,
+    p.status,
+    p.failure_code,
+    p.failure_message,
+    p.paid_at,
+    p.refunded_at,
+    p.created_at,
+    p.updated_at,
+    p.refund_attempts,
+    p.refund_available_at,
+    p.refund_locked_at
+FROM payments AS p
+JOIN bookings AS b
+    ON b.id = p.booking_id
+JOIN users AS u
+    ON u.id = b.user_id
+JOIN room_types AS rt
+    ON rt.id = b.room_type_id
+JOIN hotels AS h
+    ON h.id = rt.hotel_id
+WHERE (
+        $1::text IS NULL
+        OR p.status = $1
+    )
+  AND (
+        $2::text IS NULL
+        OR p.provider = $2
+    )
+  AND (
+        $3::bigint IS NULL
+        OR p.booking_id = $3
+    )
+ORDER BY p.created_at DESC, p.id DESC
+LIMIT $5::int
+OFFSET $4::bigint
+`
+
+type ListPaymentsForAdminParams struct {
+	PaymentStatus pgtype.Text `json:"payment_status"`
+	Provider      pgtype.Text `json:"provider"`
+	BookingID     pgtype.Int8 `json:"booking_id"`
+	ResultOffset  int64       `json:"result_offset"`
+	ResultLimit   int32       `json:"result_limit"`
+}
+
+type ListPaymentsForAdminRow struct {
+	ID                int64              `json:"id"`
+	BookingID         int64              `json:"booking_id"`
+	BookingStatus     string             `json:"booking_status"`
+	CustomerID        int64              `json:"customer_id"`
+	CustomerName      string             `json:"customer_name"`
+	CustomerEmail     string             `json:"customer_email"`
+	HotelID           int64              `json:"hotel_id"`
+	HotelName         string             `json:"hotel_name"`
+	Provider          string             `json:"provider"`
+	ProviderPaymentID pgtype.Text        `json:"provider_payment_id"`
+	AmountMinor       int64              `json:"amount_minor"`
+	Currency          string             `json:"currency"`
+	Status            string             `json:"status"`
+	FailureCode       pgtype.Text        `json:"failure_code"`
+	FailureMessage    pgtype.Text        `json:"failure_message"`
+	PaidAt            pgtype.Timestamptz `json:"paid_at"`
+	RefundedAt        pgtype.Timestamptz `json:"refunded_at"`
+	CreatedAt         pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt         pgtype.Timestamptz `json:"updated_at"`
+	RefundAttempts    int32              `json:"refund_attempts"`
+	RefundAvailableAt pgtype.Timestamptz `json:"refund_available_at"`
+	RefundLockedAt    pgtype.Timestamptz `json:"refund_locked_at"`
+}
+
+func (q *Queries) ListPaymentsForAdmin(ctx context.Context, arg ListPaymentsForAdminParams) ([]ListPaymentsForAdminRow, error) {
+	rows, err := q.db.Query(ctx, listPaymentsForAdmin,
+		arg.PaymentStatus,
+		arg.Provider,
+		arg.BookingID,
+		arg.ResultOffset,
+		arg.ResultLimit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListPaymentsForAdminRow
+	for rows.Next() {
+		var i ListPaymentsForAdminRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.BookingID,
+			&i.BookingStatus,
+			&i.CustomerID,
+			&i.CustomerName,
+			&i.CustomerEmail,
+			&i.HotelID,
+			&i.HotelName,
+			&i.Provider,
+			&i.ProviderPaymentID,
+			&i.AmountMinor,
+			&i.Currency,
+			&i.Status,
+			&i.FailureCode,
+			&i.FailureMessage,
+			&i.PaidAt,
+			&i.RefundedAt,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+			&i.RefundAttempts,
+			&i.RefundAvailableAt,
+			&i.RefundLockedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const listPaymentsForReconciliation = `-- name: ListPaymentsForReconciliation :many
@@ -427,7 +829,10 @@ SELECT
     paid_at,
     refunded_at,
     created_at,
-    updated_at
+    updated_at,
+    refund_attempts,
+    refund_available_at,
+    refund_locked_at
 FROM payments
 WHERE provider = $1
   AND status = 'pending'
@@ -467,63 +872,9 @@ func (q *Queries) ListPaymentsForReconciliation(ctx context.Context, arg ListPay
 			&i.RefundedAt,
 			&i.CreatedAt,
 			&i.UpdatedAt,
-		); err != nil {
-			return nil, err
-		}
-		items = append(items, i)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return items, nil
-}
-
-const listRefundPendingPayments = `-- name: ListRefundPendingPayments :many
-SELECT
-    id,
-    booking_id,
-    provider,
-    provider_payment_id,
-    provider_idempotency_key,
-    amount_minor,
-    currency,
-    status,
-    failure_code,
-    failure_message,
-    paid_at,
-    refunded_at,
-    created_at,
-    updated_at
-FROM payments
-WHERE status = 'refund_pending'
-ORDER BY updated_at, id
-LIMIT $1::int
-`
-
-func (q *Queries) ListRefundPendingPayments(ctx context.Context, batchSize int32) ([]Payment, error) {
-	rows, err := q.db.Query(ctx, listRefundPendingPayments, batchSize)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var items []Payment
-	for rows.Next() {
-		var i Payment
-		if err := rows.Scan(
-			&i.ID,
-			&i.BookingID,
-			&i.Provider,
-			&i.ProviderPaymentID,
-			&i.ProviderIdempotencyKey,
-			&i.AmountMinor,
-			&i.Currency,
-			&i.Status,
-			&i.FailureCode,
-			&i.FailureMessage,
-			&i.PaidAt,
-			&i.RefundedAt,
-			&i.CreatedAt,
-			&i.UpdatedAt,
+			&i.RefundAttempts,
+			&i.RefundAvailableAt,
+			&i.RefundLockedAt,
 		); err != nil {
 			return nil, err
 		}
@@ -539,6 +890,9 @@ const markExpiredPaymentRefundPending = `-- name: MarkExpiredPaymentRefundPendin
 UPDATE payments
 SET
     status = 'refund_pending',
+    refund_attempts = 0,
+    refund_available_at = now(),
+    refund_locked_at = NULL,
     failure_code = NULL,
     failure_message = NULL,
     paid_at = COALESCE(paid_at, now()),
@@ -559,7 +913,10 @@ RETURNING
     paid_at,
     refunded_at,
     created_at,
-    updated_at
+    updated_at,
+    refund_attempts,
+    refund_available_at,
+    refund_locked_at
 `
 
 func (q *Queries) MarkExpiredPaymentRefundPending(ctx context.Context, paymentID int64) (Payment, error) {
@@ -580,6 +937,9 @@ func (q *Queries) MarkExpiredPaymentRefundPending(ctx context.Context, paymentID
 		&i.RefundedAt,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.RefundAttempts,
+		&i.RefundAvailableAt,
+		&i.RefundLockedAt,
 	)
 	return i, err
 }
@@ -605,7 +965,10 @@ RETURNING
     paid_at,
     refunded_at,
     created_at,
-    updated_at
+    updated_at,
+    refund_attempts,
+    refund_available_at,
+    refund_locked_at
 `
 
 func (q *Queries) MarkPaymentExpired(ctx context.Context, paymentID int64) (Payment, error) {
@@ -626,6 +989,9 @@ func (q *Queries) MarkPaymentExpired(ctx context.Context, paymentID int64) (Paym
 		&i.RefundedAt,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.RefundAttempts,
+		&i.RefundAvailableAt,
+		&i.RefundLockedAt,
 	)
 	return i, err
 }
@@ -634,6 +1000,9 @@ const markPaymentRefundPending = `-- name: MarkPaymentRefundPending :one
 UPDATE payments
 SET
     status = 'refund_pending',
+    refund_attempts = 0,
+    refund_available_at = now(),
+    refund_locked_at = NULL,
     updated_at = now()
 WHERE id = $1
   AND status = 'succeeded'
@@ -651,7 +1020,10 @@ RETURNING
     paid_at,
     refunded_at,
     created_at,
-    updated_at
+    updated_at,
+    refund_attempts,
+    refund_available_at,
+    refund_locked_at
 `
 
 func (q *Queries) MarkPaymentRefundPending(ctx context.Context, paymentID int64) (Payment, error) {
@@ -672,40 +1044,133 @@ func (q *Queries) MarkPaymentRefundPending(ctx context.Context, paymentID int64)
 		&i.RefundedAt,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.RefundAttempts,
+		&i.RefundAvailableAt,
+		&i.RefundLockedAt,
 	)
 	return i, err
 }
 
 const markPaymentRefunded = `-- name: MarkPaymentRefunded :one
-UPDATE payments
-SET
-    status = 'refunded',
-    failure_code = NULL,
-    failure_message = NULL,
-    refunded_at = now(),
-    updated_at = now()
-WHERE id = $1
-  AND status = 'refund_pending'
-RETURNING
-    id,
-    booking_id,
-    provider,
-    provider_payment_id,
-    provider_idempotency_key,
-    amount_minor,
-    currency,
-    status,
-    failure_code,
-    failure_message,
-    paid_at,
-    refunded_at,
-    created_at,
-    updated_at
+WITH refunded_payment AS (
+    UPDATE payments AS payment
+    SET
+        status = 'refunded',
+        failure_code = NULL,
+        failure_message = NULL,
+        refunded_at = now(),
+        refund_available_at = NULL,
+        refund_locked_at = NULL,
+        updated_at = now()
+    WHERE payment.id = $1
+      AND payment.status = 'refund_pending'
+      AND payment.refund_locked_at = $2
+    RETURNING
+        payment.id,
+        payment.booking_id,
+        payment.provider,
+        payment.provider_payment_id,
+        payment.provider_idempotency_key,
+        payment.amount_minor,
+        payment.currency,
+        payment.status,
+        payment.failure_code,
+        payment.failure_message,
+        payment.paid_at,
+        payment.refunded_at,
+        payment.created_at,
+        payment.updated_at,
+        payment.refund_attempts,
+        payment.refund_available_at,
+        payment.refund_locked_at
+),
+enqueued_email AS (
+    INSERT INTO email_outbox (
+        booking_id,
+        event_type,
+        recipient_email,
+        payload
+    )
+    SELECT
+        b.id,
+        'payment_refunded',
+        u.email,
+        jsonb_build_object(
+            'booking_id', b.id,
+            'guest_name', u.full_name,
+            'hotel_name', h.name,
+            'room_type_name', rt.name,
+            'check_in', b.check_in,
+            'check_out', b.check_out,
+            'rooms_count', b.rooms_count,
+            'guest_count', b.guest_count,
+            'price_per_night', b.price_per_night::text,
+            'total_price', b.total_price::text,
+            'currency', b.currency
+        )
+    FROM refunded_payment AS p
+    JOIN bookings AS b
+        ON b.id = p.booking_id
+    JOIN users AS u
+        ON u.id = b.user_id
+    JOIN room_types AS rt
+        ON rt.id = b.room_type_id
+    JOIN hotels AS h
+        ON h.id = rt.hotel_id
+    ON CONFLICT (booking_id, event_type) DO NOTHING
+    RETURNING booking_id
+)
+SELECT
+    p.id,
+    p.booking_id,
+    p.provider,
+    p.provider_payment_id,
+    p.provider_idempotency_key,
+    p.amount_minor,
+    p.currency,
+    p.status,
+    p.failure_code,
+    p.failure_message,
+    p.paid_at,
+    p.refunded_at,
+    p.created_at,
+    p.updated_at,
+    p.refund_attempts,
+    p.refund_available_at,
+    p.refund_locked_at
+FROM refunded_payment AS p
+LEFT JOIN enqueued_email AS e
+    ON e.booking_id = p.booking_id
 `
 
-func (q *Queries) MarkPaymentRefunded(ctx context.Context, paymentID int64) (Payment, error) {
-	row := q.db.QueryRow(ctx, markPaymentRefunded, paymentID)
-	var i Payment
+type MarkPaymentRefundedParams struct {
+	PaymentID      int64              `json:"payment_id"`
+	RefundLockedAt pgtype.Timestamptz `json:"refund_locked_at"`
+}
+
+type MarkPaymentRefundedRow struct {
+	ID                     int64              `json:"id"`
+	BookingID              int64              `json:"booking_id"`
+	Provider               string             `json:"provider"`
+	ProviderPaymentID      pgtype.Text        `json:"provider_payment_id"`
+	ProviderIdempotencyKey string             `json:"provider_idempotency_key"`
+	AmountMinor            int64              `json:"amount_minor"`
+	Currency               string             `json:"currency"`
+	Status                 string             `json:"status"`
+	FailureCode            pgtype.Text        `json:"failure_code"`
+	FailureMessage         pgtype.Text        `json:"failure_message"`
+	PaidAt                 pgtype.Timestamptz `json:"paid_at"`
+	RefundedAt             pgtype.Timestamptz `json:"refunded_at"`
+	CreatedAt              pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt              pgtype.Timestamptz `json:"updated_at"`
+	RefundAttempts         int32              `json:"refund_attempts"`
+	RefundAvailableAt      pgtype.Timestamptz `json:"refund_available_at"`
+	RefundLockedAt         pgtype.Timestamptz `json:"refund_locked_at"`
+}
+
+func (q *Queries) MarkPaymentRefunded(ctx context.Context, arg MarkPaymentRefundedParams) (MarkPaymentRefundedRow, error) {
+	row := q.db.QueryRow(ctx, markPaymentRefunded, arg.PaymentID, arg.RefundLockedAt)
+	var i MarkPaymentRefundedRow
 	err := row.Scan(
 		&i.ID,
 		&i.BookingID,
@@ -721,6 +1186,9 @@ func (q *Queries) MarkPaymentRefunded(ctx context.Context, paymentID int64) (Pay
 		&i.RefundedAt,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.RefundAttempts,
+		&i.RefundAvailableAt,
+		&i.RefundLockedAt,
 	)
 	return i, err
 }
@@ -749,7 +1217,10 @@ RETURNING
     paid_at,
     refunded_at,
     created_at,
-    updated_at
+    updated_at,
+    refund_attempts,
+    refund_available_at,
+    refund_locked_at
 `
 
 func (q *Queries) MarkPaymentSucceeded(ctx context.Context, paymentID int64) (Payment, error) {
@@ -770,6 +1241,9 @@ func (q *Queries) MarkPaymentSucceeded(ctx context.Context, paymentID int64) (Pa
 		&i.RefundedAt,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.RefundAttempts,
+		&i.RefundAvailableAt,
+		&i.RefundLockedAt,
 	)
 	return i, err
 }
@@ -796,7 +1270,10 @@ RETURNING
     paid_at,
     refunded_at,
     created_at,
-    updated_at
+    updated_at,
+    refund_attempts,
+    refund_available_at,
+    refund_locked_at
 `
 
 type RecordPaymentFailureParams struct {
@@ -823,28 +1300,204 @@ func (q *Queries) RecordPaymentFailure(ctx context.Context, arg RecordPaymentFai
 		&i.RefundedAt,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.RefundAttempts,
+		&i.RefundAvailableAt,
+		&i.RefundLockedAt,
 	)
 	return i, err
 }
 
-const recordPaymentRefundFailure = `-- name: RecordPaymentRefundFailure :exec
-UPDATE payments
-SET
-    failure_code = 'refund_provider_error',
-    failure_message = $1,
-    updated_at = now()
-WHERE id = $2
-  AND status = 'refund_pending'
+const recordSuccessfulPaymentRefundAttempt = `-- name: RecordSuccessfulPaymentRefundAttempt :execrows
+INSERT INTO payment_refund_attempts (
+    payment_id,
+    attempt_number,
+    status,
+    started_at,
+    completed_at
+)
+SELECT
+    payment.id,
+    payment.refund_attempts,
+    'succeeded',
+    payment.refund_locked_at,
+    now()
+FROM payments AS payment
+WHERE payment.id = $1
+  AND payment.status = 'refund_pending'
+  AND payment.refund_locked_at = $2
 `
 
-type RecordPaymentRefundFailureParams struct {
-	FailureMessage pgtype.Text `json:"failure_message"`
-	PaymentID      int64       `json:"payment_id"`
+type RecordSuccessfulPaymentRefundAttemptParams struct {
+	PaymentID      int64              `json:"payment_id"`
+	RefundLockedAt pgtype.Timestamptz `json:"refund_locked_at"`
 }
 
-func (q *Queries) RecordPaymentRefundFailure(ctx context.Context, arg RecordPaymentRefundFailureParams) error {
-	_, err := q.db.Exec(ctx, recordPaymentRefundFailure, arg.FailureMessage, arg.PaymentID)
-	return err
+func (q *Queries) RecordSuccessfulPaymentRefundAttempt(ctx context.Context, arg RecordSuccessfulPaymentRefundAttemptParams) (int64, error) {
+	result, err := q.db.Exec(ctx, recordSuccessfulPaymentRefundAttempt, arg.PaymentID, arg.RefundLockedAt)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const retryFailedPaymentRefundForAdmin = `-- name: RetryFailedPaymentRefundForAdmin :one
+WITH retried_refund AS (
+    UPDATE payments AS payment
+    SET
+        refund_available_at = now(),
+        failure_code = NULL,
+        failure_message = NULL,
+        updated_at = now()
+    WHERE payment.id = $1
+      AND payment.status = 'refund_pending'
+      AND payment.failure_code IS NOT NULL
+      AND payment.refund_locked_at IS NULL
+    RETURNING payment.id
+)
+SELECT
+    p.id,
+    p.booking_id,
+    b.status AS booking_status,
+    u.id AS customer_id,
+    u.full_name AS customer_name,
+    u.email AS customer_email,
+    h.id AS hotel_id,
+    h.name AS hotel_name,
+    p.provider,
+    p.provider_payment_id,
+    p.amount_minor,
+    p.currency,
+    p.status,
+    p.failure_code,
+    p.failure_message,
+    p.paid_at,
+    p.refunded_at,
+    p.created_at,
+    p.updated_at,
+    p.refund_attempts,
+    p.refund_available_at,
+    p.refund_locked_at
+FROM retried_refund AS rr
+JOIN payments AS p
+    ON p.id = rr.id
+JOIN bookings AS b
+    ON b.id = p.booking_id
+JOIN users AS u
+    ON u.id = b.user_id
+JOIN room_types AS rt
+    ON rt.id = b.room_type_id
+JOIN hotels AS h
+    ON h.id = rt.hotel_id
+`
+
+type RetryFailedPaymentRefundForAdminRow struct {
+	ID                int64              `json:"id"`
+	BookingID         int64              `json:"booking_id"`
+	BookingStatus     string             `json:"booking_status"`
+	CustomerID        int64              `json:"customer_id"`
+	CustomerName      string             `json:"customer_name"`
+	CustomerEmail     string             `json:"customer_email"`
+	HotelID           int64              `json:"hotel_id"`
+	HotelName         string             `json:"hotel_name"`
+	Provider          string             `json:"provider"`
+	ProviderPaymentID pgtype.Text        `json:"provider_payment_id"`
+	AmountMinor       int64              `json:"amount_minor"`
+	Currency          string             `json:"currency"`
+	Status            string             `json:"status"`
+	FailureCode       pgtype.Text        `json:"failure_code"`
+	FailureMessage    pgtype.Text        `json:"failure_message"`
+	PaidAt            pgtype.Timestamptz `json:"paid_at"`
+	RefundedAt        pgtype.Timestamptz `json:"refunded_at"`
+	CreatedAt         pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt         pgtype.Timestamptz `json:"updated_at"`
+	RefundAttempts    int32              `json:"refund_attempts"`
+	RefundAvailableAt pgtype.Timestamptz `json:"refund_available_at"`
+	RefundLockedAt    pgtype.Timestamptz `json:"refund_locked_at"`
+}
+
+func (q *Queries) RetryFailedPaymentRefundForAdmin(ctx context.Context, paymentID int64) (RetryFailedPaymentRefundForAdminRow, error) {
+	row := q.db.QueryRow(ctx, retryFailedPaymentRefundForAdmin, paymentID)
+	var i RetryFailedPaymentRefundForAdminRow
+	err := row.Scan(
+		&i.ID,
+		&i.BookingID,
+		&i.BookingStatus,
+		&i.CustomerID,
+		&i.CustomerName,
+		&i.CustomerEmail,
+		&i.HotelID,
+		&i.HotelName,
+		&i.Provider,
+		&i.ProviderPaymentID,
+		&i.AmountMinor,
+		&i.Currency,
+		&i.Status,
+		&i.FailureCode,
+		&i.FailureMessage,
+		&i.PaidAt,
+		&i.RefundedAt,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.RefundAttempts,
+		&i.RefundAvailableAt,
+		&i.RefundLockedAt,
+	)
+	return i, err
+}
+
+const schedulePaymentRefundRetry = `-- name: SchedulePaymentRefundRetry :execrows
+WITH scheduled_payment AS (
+    UPDATE payments AS payment
+    SET
+        failure_code = 'refund_provider_error',
+        failure_message = $1,
+        refund_available_at = now()
+            + make_interval(secs => $3::int),
+        refund_locked_at = NULL,
+        updated_at = now()
+    WHERE payment.id = $4
+      AND payment.status = 'refund_pending'
+      AND payment.refund_locked_at = $2
+    RETURNING payment.id, payment.refund_attempts
+)
+INSERT INTO payment_refund_attempts (
+    payment_id,
+    attempt_number,
+    status,
+    failure_code,
+    failure_message,
+    started_at,
+    completed_at
+)
+SELECT
+    payment.id,
+    payment.refund_attempts,
+    'failed',
+    'refund_provider_error',
+    $1,
+    $2,
+    now()
+FROM scheduled_payment AS payment
+`
+
+type SchedulePaymentRefundRetryParams struct {
+	FailureMessage    pgtype.Text        `json:"failure_message"`
+	RefundLockedAt    pgtype.Timestamptz `json:"refund_locked_at"`
+	RetryAfterSeconds int32              `json:"retry_after_seconds"`
+	PaymentID         int64              `json:"payment_id"`
+}
+
+func (q *Queries) SchedulePaymentRefundRetry(ctx context.Context, arg SchedulePaymentRefundRetryParams) (int64, error) {
+	result, err := q.db.Exec(ctx, schedulePaymentRefundRetry,
+		arg.FailureMessage,
+		arg.RefundLockedAt,
+		arg.RetryAfterSeconds,
+		arg.PaymentID,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
 }
 
 const setPaymentProviderID = `-- name: SetPaymentProviderID :one
@@ -869,7 +1522,10 @@ RETURNING
     paid_at,
     refunded_at,
     created_at,
-    updated_at
+    updated_at,
+    refund_attempts,
+    refund_available_at,
+    refund_locked_at
 `
 
 type SetPaymentProviderIDParams struct {
@@ -895,6 +1551,9 @@ func (q *Queries) SetPaymentProviderID(ctx context.Context, arg SetPaymentProvid
 		&i.RefundedAt,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.RefundAttempts,
+		&i.RefundAvailableAt,
+		&i.RefundLockedAt,
 	)
 	return i, err
 }

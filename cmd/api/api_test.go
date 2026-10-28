@@ -78,6 +78,74 @@ func TestNewAPIHandlerProtectsPaymentSessionRoute(t *testing.T) {
 	}
 }
 
+func TestNewAPIHandlerProtectsAdminEmailOutboxRoutes(t *testing.T) {
+	apiHandler, tokenManager := newTestAPIHandlerWithTokenManager(t)
+	paths := []struct {
+		method string
+		path   string
+	}{
+		{method: http.MethodGet, path: "/admin/email-outbox"},
+		{method: http.MethodPost, path: "/admin/email-outbox/1/retry"},
+	}
+
+	for _, route := range paths {
+		t.Run(route.method+" "+route.path, func(t *testing.T) {
+			request := httptest.NewRequest(route.method, route.path, nil)
+			response := httptest.NewRecorder()
+			apiHandler.ServeHTTP(response, request)
+			if response.Code != http.StatusUnauthorized {
+				t.Fatalf("unauthenticated status = %d, want 401", response.Code)
+			}
+
+			customerToken, err := tokenManager.GenerateToken(42, auth.RoleCustomer)
+			if err != nil {
+				t.Fatalf("generate customer token: %v", err)
+			}
+			request = httptest.NewRequest(route.method, route.path, nil)
+			request.Header.Set("Authorization", "Bearer "+customerToken)
+			response = httptest.NewRecorder()
+			apiHandler.ServeHTTP(response, request)
+			if response.Code != http.StatusForbidden {
+				t.Fatalf("customer status = %d, want 403", response.Code)
+			}
+		})
+	}
+}
+
+func TestNewAPIHandlerProtectsAdminPaymentRoutes(t *testing.T) {
+	apiHandler, tokenManager := newTestAPIHandlerWithTokenManager(t)
+	for _, route := range []struct {
+		method string
+		path   string
+	}{
+		{method: http.MethodGet, path: "/admin/payments"},
+		{method: http.MethodGet, path: "/admin/payments/1"},
+		{method: http.MethodGet, path: "/admin/payments/1/refund-attempts"},
+		{method: http.MethodPost, path: "/admin/payments/1/retry-refund"},
+	} {
+		t.Run(route.method+" "+route.path, func(t *testing.T) {
+			request := httptest.NewRequest(route.method, route.path, nil)
+			response := httptest.NewRecorder()
+			apiHandler.ServeHTTP(response, request)
+			if response.Code != http.StatusUnauthorized {
+				t.Fatalf("unauthenticated status = %d, want 401", response.Code)
+			}
+
+			customerToken, err := tokenManager.GenerateToken(42, auth.RoleCustomer)
+			if err != nil {
+				t.Fatalf("generate customer token: %v", err)
+			}
+			request = httptest.NewRequest(route.method, route.path, nil)
+			request.Header.Set("Authorization", "Bearer "+customerToken)
+			response = httptest.NewRecorder()
+			apiHandler.ServeHTTP(response, request)
+			if response.Code != http.StatusForbidden {
+				t.Fatalf("customer status = %d, want 403", response.Code)
+			}
+		})
+	}
+}
+
 func TestNewAPIHandlerRegistersOnlySelectedPaymentWebhook(t *testing.T) {
 	t.Parallel()
 
@@ -357,25 +425,27 @@ func newTestAPIHandlerWithPaymentProvider(t *testing.T, paymentProvider string) 
 	}
 
 	return newAPIHandler(apiDependencies{
-		healthHandler:         handler.NewHealthHandler(healthyDatabase{}, time.Second, logger),
-		hotelHandler:          new(handler.HotelHandler),
-		roomTypeHandler:       new(handler.RoomTypeHandler),
-		amenityHandler:        new(handler.AmenityHandler),
-		userHandler:           new(handler.UserHandler),
-		authHandler:           new(handler.AuthHandler),
-		oauthHandler:          new(handler.OAuthHandler),
-		passwordResetHandler:  new(handler.PasswordResetHandler),
-		bookingHandler:        new(handler.BookingHandler),
-		paymentHandler:        new(handler.PaymentHandler),
-		paymentWebhookHandler: new(handler.PaymentWebhookHandler),
-		paymentProvider:       paymentProvider,
-		adminBookingHandler:   new(handler.AdminBookingHandler),
-		reviewHandler:         new(handler.ReviewHandler),
-		hotelImageHandler:     new(handler.HotelImageHandler),
-		inventoryHandler:      new(handler.InventoryHandler),
-		authMiddleware:        middleware.NewAuthMiddleware(tokenManager),
-		corsMiddleware:        corsMiddleware,
-		authRateLimiter:       authRateLimiter,
-		logger:                logger,
+		healthHandler:           handler.NewHealthHandler(healthyDatabase{}, time.Second, logger),
+		hotelHandler:            new(handler.HotelHandler),
+		roomTypeHandler:         new(handler.RoomTypeHandler),
+		amenityHandler:          new(handler.AmenityHandler),
+		userHandler:             new(handler.UserHandler),
+		authHandler:             new(handler.AuthHandler),
+		oauthHandler:            new(handler.OAuthHandler),
+		passwordResetHandler:    new(handler.PasswordResetHandler),
+		bookingHandler:          new(handler.BookingHandler),
+		paymentHandler:          new(handler.PaymentHandler),
+		paymentWebhookHandler:   new(handler.PaymentWebhookHandler),
+		paymentProvider:         paymentProvider,
+		adminBookingHandler:     new(handler.AdminBookingHandler),
+		adminEmailOutboxHandler: new(handler.AdminEmailOutboxHandler),
+		adminPaymentHandler:     new(handler.AdminPaymentHandler),
+		reviewHandler:           new(handler.ReviewHandler),
+		hotelImageHandler:       new(handler.HotelImageHandler),
+		inventoryHandler:        new(handler.InventoryHandler),
+		authMiddleware:          middleware.NewAuthMiddleware(tokenManager),
+		corsMiddleware:          corsMiddleware,
+		authRateLimiter:         authRateLimiter,
+		logger:                  logger,
 	}), tokenManager
 }

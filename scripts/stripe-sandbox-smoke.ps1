@@ -8,6 +8,7 @@ The script creates disposable fixtures in the Docker test database and verifies:
 1. Successful payment, booking confirmation, cancellation, and refund.
 2. Declined payment, retryability, reuse of the PaymentIntent, and successful retry.
 3. Room inventory before payment, after cancellation, and after retry.
+4. Transactional-email outbox delivery through SMTP to Mailpit.
 
 Ryoko and `stripe listen` must already be running with PAYMENT_PROVIDER=stripe.
 The script refuses non-loopback API URLs unless -AllowRemoteApi is supplied.
@@ -24,8 +25,10 @@ param(
     [string]$PostgresContainer = "",
     [string]$DatabaseUser = "test",
     [string]$DatabaseName = "testdb",
+    [string]$MailpitBaseUrl = "http://127.0.0.1:8025",
     [int]$WebhookTimeoutSeconds = 30,
     [int]$RefundTimeoutSeconds = 90,
+    [int]$EmailTimeoutSeconds = 30,
     [switch]$AllowRemoteApi
 )
 
@@ -117,7 +120,10 @@ function New-SmokeUserSession {
         password = $password
     }
     Assert-True ([bool]$login.access_token) "Login did not return an access token"
-    return [string]$login.access_token
+    return [PSCustomObject]@{
+        AccessToken = [string]$login.access_token
+        Email       = $email
+    }
 }
 
 function New-SmokeBooking {
@@ -249,6 +255,60 @@ WHERE room_type_id = $RoomTypeId
     Assert-Equal ([int]$parts[1]) $ExpectedBookedSum "$Description booked-room total is incorrect"
 }
 
+function Wait-ForTransactionalEmails {
+    param(
+        [long]$SuccessBookingId,
+        [string]$SuccessEmail,
+        [long]$RetryBookingId,
+        [string]$RetryEmail,
+        [int]$TimeoutSeconds
+    )
+
+    $expected = @(
+        [PSCustomObject]@{ Email = $SuccessEmail; Subject = "Your Ryoko booking is confirmed" },
+        [PSCustomObject]@{ Email = $SuccessEmail; Subject = "Your Ryoko booking was cancelled" },
+        [PSCustomObject]@{ Email = $SuccessEmail; Subject = "Your Ryoko refund is complete" },
+        [PSCustomObject]@{ Email = $RetryEmail; Subject = "Your Ryoko booking is confirmed" }
+    )
+
+    $timer = [Diagnostics.Stopwatch]::StartNew()
+    $lastOutboxState = "0|0"
+    $lastDeliveredCount = 0
+    do {
+        $lastOutboxState = Invoke-PsqlScalar @"
+SELECT count(*) FILTER (WHERE status = 'sent')::text
+    || '|'
+    || count(*)::text
+FROM email_outbox
+WHERE booking_id IN ($SuccessBookingId, $RetryBookingId);
+"@
+        $outboxParts = $lastOutboxState -split "\|"
+        $allOutboxRowsSent =
+            [int]$outboxParts[0] -eq $expected.Count -and
+            [int]$outboxParts[1] -eq $expected.Count
+
+        $inbox = Invoke-RestMethod -Method Get -Uri "$script:MailpitBase/api/v1/messages"
+        $messages = @($inbox.messages)
+        $lastDeliveredCount = 0
+        foreach ($wanted in $expected) {
+            $matched = @($messages | Where-Object {
+                $_.Subject -eq $wanted.Subject -and
+                @($_.To | ForEach-Object { $_.Address }) -contains $wanted.Email
+            }).Count -gt 0
+            if ($matched) {
+                $lastDeliveredCount++
+            }
+        }
+
+        if ($allOutboxRowsSent -and $lastDeliveredCount -eq $expected.Count) {
+            return
+        }
+        Start-Sleep -Seconds 1
+    } while ($timer.Elapsed.TotalSeconds -lt $TimeoutSeconds)
+
+    throw "Timed out waiting for transactional emails; outbox sent/total was '$lastOutboxState' and Mailpit contained $lastDeliveredCount of $($expected.Count) expected messages."
+}
+
 function Resolve-PostgresContainer {
     if ($PostgresContainer) {
         return $PostgresContainer
@@ -275,6 +335,14 @@ if ($WebhookTimeoutSeconds -lt 1 -or $RefundTimeoutSeconds -lt 1) {
     throw "Timeouts must be positive"
 }
 $script:ApiBase = $BaseUrl.TrimEnd("/")
+$mailpitUri = [Uri]$MailpitBaseUrl
+if ($mailpitUri.Host -notin $loopbackHosts) {
+    throw "Refusing to inspect non-local Mailpit URL '$MailpitBaseUrl'."
+}
+$script:MailpitBase = $MailpitBaseUrl.TrimEnd("/")
+if ($EmailTimeoutSeconds -lt 1) {
+    throw "Email timeout must be positive"
+}
 
 Write-Step "Checking prerequisites"
 foreach ($command in @("stripe", "docker")) {
@@ -288,6 +356,8 @@ if ($sandbox.ExitCode -ne 0 -or $sandbox.Output -notmatch "(?i)sandbox") {
 }
 $ready = Invoke-WebRequest -UseBasicParsing "$script:ApiBase/health/ready" -TimeoutSec 5
 Assert-Equal $ready.StatusCode 200 "Ryoko is not ready"
+$mailpitReady = Invoke-WebRequest -UseBasicParsing "$script:MailpitBase/api/v1/messages" -TimeoutSec 5
+Assert-Equal $mailpitReady.StatusCode 200 "Mailpit is not ready"
 $script:PostgresContainer = Resolve-PostgresContainer
 
 Write-Step "Creating an isolated hotel and room type in the Docker test database"
@@ -306,7 +376,8 @@ RETURNING id;
 $roomTypeId = [long]$roomTypeIdText
 
 Write-Step "Testing successful payment and refund"
-$successToken = New-SmokeUserSession -Label "success"
+$successUser = New-SmokeUserSession -Label "success"
+$successToken = $successUser.AccessToken
 $successCheckIn = [DateTime]::UtcNow.Date.AddDays(30)
 $successCheckOut = $successCheckIn.AddDays(3)
 $successBooking = New-SmokeBooking -RoomTypeId $roomTypeId -AccessToken $successToken `
@@ -356,7 +427,8 @@ Assert-Equal $stripeRefunds.data[0].status "succeeded" "Stripe refund status is 
 Assert-Equal ([long]$stripeRefunds.data[0].amount) 3000000 "Stripe refund amount is incorrect"
 
 Write-Step "Testing declined payment and successful retry"
-$retryToken = New-SmokeUserSession -Label "retry"
+$retryUser = New-SmokeUserSession -Label "retry"
+$retryToken = $retryUser.AccessToken
 $retryCheckIn = [DateTime]::UtcNow.Date.AddDays(60)
 $retryCheckOut = $retryCheckIn.AddDays(3)
 $retryBooking = New-SmokeBooking -RoomTypeId $roomTypeId -AccessToken $retryToken `
@@ -391,6 +463,12 @@ Assert-Equal $retriedBooking.status "confirmed" "Retried booking was not confirm
 Assert-Inventory -RoomTypeId $roomTypeId -CheckIn $retryCheckIn -CheckOut $retryCheckOut `
     -ExpectedRows 3 -ExpectedBookedSum 3 -Description "Successfully retried booking"
 
+Write-Step "Verifying transactional email delivery"
+Wait-ForTransactionalEmails `
+    -SuccessBookingId $successBooking.id -SuccessEmail $successUser.Email `
+    -RetryBookingId $retryBooking.id -RetryEmail $retryUser.Email `
+    -TimeoutSeconds $EmailTimeoutSeconds
+
 Write-Host ""
 Write-Host "Stripe sandbox smoke test passed" -ForegroundColor Green
 [PSCustomObject]@{
@@ -403,4 +481,5 @@ Write-Host "Stripe sandbox smoke test passed" -ForegroundColor Green
     currency                  = "VND"
     successful_refund         = $true
     successful_decline_retry  = $true
+    transactional_emails_sent = 4
 } | Format-List

@@ -14,26 +14,28 @@ import (
 // Keeping construction outside this type lets main own infrastructure startup,
 // while tests can exercise the same router and middleware stack as production.
 type apiDependencies struct {
-	healthHandler         *handler.HealthHandler
-	hotelHandler          *handler.HotelHandler
-	roomTypeHandler       *handler.RoomTypeHandler
-	amenityHandler        *handler.AmenityHandler
-	userHandler           *handler.UserHandler
-	authHandler           *handler.AuthHandler
-	oauthHandler          *handler.OAuthHandler
-	passwordResetHandler  *handler.PasswordResetHandler
-	bookingHandler        *handler.BookingHandler
-	paymentHandler        *handler.PaymentHandler
-	paymentWebhookHandler *handler.PaymentWebhookHandler
-	paymentProvider       string
-	adminBookingHandler   *handler.AdminBookingHandler
-	reviewHandler         *handler.ReviewHandler
-	hotelImageHandler     *handler.HotelImageHandler
-	inventoryHandler      *handler.InventoryHandler
-	authMiddleware        *middleware.AuthMiddleware
-	corsMiddleware        *middleware.CORSMiddleware
-	authRateLimiter       *middleware.IPRateLimiter
-	logger                *slog.Logger
+	healthHandler           *handler.HealthHandler
+	hotelHandler            *handler.HotelHandler
+	roomTypeHandler         *handler.RoomTypeHandler
+	amenityHandler          *handler.AmenityHandler
+	userHandler             *handler.UserHandler
+	authHandler             *handler.AuthHandler
+	oauthHandler            *handler.OAuthHandler
+	passwordResetHandler    *handler.PasswordResetHandler
+	bookingHandler          *handler.BookingHandler
+	paymentHandler          *handler.PaymentHandler
+	paymentWebhookHandler   *handler.PaymentWebhookHandler
+	paymentProvider         string
+	adminBookingHandler     *handler.AdminBookingHandler
+	adminEmailOutboxHandler *handler.AdminEmailOutboxHandler
+	adminPaymentHandler     *handler.AdminPaymentHandler
+	reviewHandler           *handler.ReviewHandler
+	hotelImageHandler       *handler.HotelImageHandler
+	inventoryHandler        *handler.InventoryHandler
+	authMiddleware          *middleware.AuthMiddleware
+	corsMiddleware          *middleware.CORSMiddleware
+	authRateLimiter         *middleware.IPRateLimiter
+	logger                  *slog.Logger
 }
 
 func newAPIHandler(deps apiDependencies) http.Handler {
@@ -68,6 +70,12 @@ func newAPIHandler(deps apiDependencies) http.Handler {
 	mux.Handle("GET /admin/bookings", adminOnly(deps.adminBookingHandler.ListBookingsForAdmin))
 	mux.Handle("GET /admin/bookings/{bookingID}/history", adminOnly(deps.adminBookingHandler.ListBookingHistoryForAdmin))
 	mux.Handle("POST /admin/bookings/{bookingID}/cancel", adminOnly(deps.adminBookingHandler.AdminCancellation))
+	mux.Handle("GET /admin/email-outbox", adminOnly(deps.adminEmailOutboxHandler.List))
+	mux.Handle("POST /admin/email-outbox/{emailID}/retry", adminOnly(deps.adminEmailOutboxHandler.Retry))
+	mux.Handle("GET /admin/payments", adminOnly(deps.adminPaymentHandler.List))
+	mux.Handle("GET /admin/payments/{paymentID}", adminOnly(deps.adminPaymentHandler.Get))
+	mux.Handle("GET /admin/payments/{paymentID}/refund-attempts", adminOnly(deps.adminPaymentHandler.ListRefundAttempts))
+	mux.Handle("POST /admin/payments/{paymentID}/retry-refund", adminOnly(deps.adminPaymentHandler.RetryRefund))
 	mux.Handle("PUT /admin/room-types/{roomTypeID}/blocked-inventory", adminOnly(deps.inventoryHandler.BlockedInventory))
 	mux.Handle("GET /admin/room-types/{roomTypeID}/inventory", adminOnly(deps.inventoryHandler.ListRoomTypeInventory))
 

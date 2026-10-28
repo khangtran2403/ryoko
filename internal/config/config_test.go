@@ -43,7 +43,10 @@ func TestLoadPaymentConfig(t *testing.T) {
 	t.Setenv("PAYMENT_EXPIRATION_INTERVAL_SECONDS", "45")
 	t.Setenv("PAYMENT_EXPIRATION_BATCH_SIZE", "250")
 	t.Setenv("PAYMENT_REFUND_INTERVAL_SECONDS", "60")
+	t.Setenv("PAYMENT_REFUND_LEASE_SECONDS", "600")
+	t.Setenv("PAYMENT_REFUND_RUN_TIMEOUT_SECONDS", "300")
 	t.Setenv("PAYMENT_REFUND_BATCH_SIZE", "75")
+	t.Setenv("PAYMENT_REFUND_BASE_RETRY_SECONDS", "120")
 	t.Setenv("PAYMENT_RECONCILIATION_INTERVAL_SECONDS", "90")
 	t.Setenv("PAYMENT_RECONCILIATION_STALE_AFTER_SECONDS", "120")
 	t.Setenv("PAYMENT_RECONCILIATION_BATCH_SIZE", "50")
@@ -69,8 +72,17 @@ func TestLoadPaymentConfig(t *testing.T) {
 	if loaded.Payment.RefundInterval != time.Minute {
 		t.Errorf("Payment.RefundInterval = %v, want 1m", loaded.Payment.RefundInterval)
 	}
+	if loaded.Payment.RefundLeaseDuration != 10*time.Minute {
+		t.Errorf("Payment.RefundLeaseDuration = %v, want 10m", loaded.Payment.RefundLeaseDuration)
+	}
+	if loaded.Payment.RefundRunTimeout != 5*time.Minute {
+		t.Errorf("Payment.RefundRunTimeout = %v, want 5m", loaded.Payment.RefundRunTimeout)
+	}
 	if loaded.Payment.RefundBatchSize != 75 {
 		t.Errorf("Payment.RefundBatchSize = %d, want 75", loaded.Payment.RefundBatchSize)
+	}
+	if loaded.Payment.RefundBaseRetryDelay != 2*time.Minute {
+		t.Errorf("Payment.RefundBaseRetryDelay = %v, want 2m", loaded.Payment.RefundBaseRetryDelay)
 	}
 	if loaded.Payment.ReconciliationInterval != 90*time.Second {
 		t.Errorf("Payment.ReconciliationInterval = %v, want 1m30s", loaded.Payment.ReconciliationInterval)
@@ -99,6 +111,9 @@ func TestLoadEmailOutboxConfig(t *testing.T) {
 	t.Setenv("EMAIL_OUTBOX_BATCH_SIZE", "40")
 	t.Setenv("EMAIL_OUTBOX_MAX_ATTEMPTS", "8")
 	t.Setenv("EMAIL_OUTBOX_BASE_RETRY_SECONDS", "120")
+	t.Setenv("EMAIL_OUTBOX_RETENTION_DAYS", "45")
+	t.Setenv("EMAIL_OUTBOX_CLEANUP_INTERVAL_HOURS", "12")
+	t.Setenv("EMAIL_OUTBOX_CLEANUP_TIMEOUT_SECONDS", "20")
 
 	loaded, err := Load()
 	if err != nil {
@@ -122,6 +137,15 @@ func TestLoadEmailOutboxConfig(t *testing.T) {
 	if loaded.EmailOutbox.BaseRetryDelay != 2*time.Minute {
 		t.Errorf("EmailOutbox.BaseRetryDelay = %v, want 2m", loaded.EmailOutbox.BaseRetryDelay)
 	}
+	if loaded.EmailOutbox.Retention != 45*24*time.Hour {
+		t.Errorf("EmailOutbox.Retention = %v, want 45d", loaded.EmailOutbox.Retention)
+	}
+	if loaded.EmailOutbox.CleanupInterval != 12*time.Hour {
+		t.Errorf("EmailOutbox.CleanupInterval = %v, want 12h", loaded.EmailOutbox.CleanupInterval)
+	}
+	if loaded.EmailOutbox.CleanupTimeout != 20*time.Second {
+		t.Errorf("EmailOutbox.CleanupTimeout = %v, want 20s", loaded.EmailOutbox.CleanupTimeout)
+	}
 }
 
 func TestLoadRejectsInvalidEmailOutboxConfig(t *testing.T) {
@@ -142,6 +166,11 @@ func TestLoadRejectsInvalidEmailOutboxConfig(t *testing.T) {
 		{name: "many attempts", key: "EMAIL_OUTBOX_MAX_ATTEMPTS", value: "101"},
 		{name: "zero retry delay", key: "EMAIL_OUTBOX_BASE_RETRY_SECONDS", value: "0"},
 		{name: "long retry delay", key: "EMAIL_OUTBOX_BASE_RETRY_SECONDS", value: "86401"},
+		{name: "invalid retention", key: "EMAIL_OUTBOX_RETENTION_DAYS", value: "invalid"},
+		{name: "zero retention", key: "EMAIL_OUTBOX_RETENTION_DAYS", value: "0"},
+		{name: "long retention", key: "EMAIL_OUTBOX_RETENTION_DAYS", value: "3651"},
+		{name: "zero cleanup interval", key: "EMAIL_OUTBOX_CLEANUP_INTERVAL_HOURS", value: "0"},
+		{name: "zero cleanup timeout", key: "EMAIL_OUTBOX_CLEANUP_TIMEOUT_SECONDS", value: "0"},
 	}
 
 	for _, test := range tests {
@@ -230,9 +259,14 @@ func TestLoadRejectsInvalidPaymentConfig(t *testing.T) {
 		{name: "zero expiration batch size", key: "PAYMENT_EXPIRATION_BATCH_SIZE", value: "0"},
 		{name: "large expiration batch size", key: "PAYMENT_EXPIRATION_BATCH_SIZE", value: "1001"},
 		{name: "zero refund interval", key: "PAYMENT_REFUND_INTERVAL_SECONDS", value: "0"},
+		{name: "zero refund lease", key: "PAYMENT_REFUND_LEASE_SECONDS", value: "0"},
+		{name: "zero refund timeout", key: "PAYMENT_REFUND_RUN_TIMEOUT_SECONDS", value: "0"},
+		{name: "refund timeout equals lease", key: "PAYMENT_REFUND_RUN_TIMEOUT_SECONDS", value: "300"},
 		{name: "invalid refund batch size", key: "PAYMENT_REFUND_BATCH_SIZE", value: "invalid"},
 		{name: "zero refund batch size", key: "PAYMENT_REFUND_BATCH_SIZE", value: "0"},
 		{name: "large refund batch size", key: "PAYMENT_REFUND_BATCH_SIZE", value: "1001"},
+		{name: "zero refund retry delay", key: "PAYMENT_REFUND_BASE_RETRY_SECONDS", value: "0"},
+		{name: "long refund retry delay", key: "PAYMENT_REFUND_BASE_RETRY_SECONDS", value: "86401"},
 		{name: "zero reconciliation interval", key: "PAYMENT_RECONCILIATION_INTERVAL_SECONDS", value: "0"},
 		{name: "zero reconciliation stale after", key: "PAYMENT_RECONCILIATION_STALE_AFTER_SECONDS", value: "0"},
 		{name: "invalid reconciliation batch size", key: "PAYMENT_RECONCILIATION_BATCH_SIZE", value: "invalid"},
