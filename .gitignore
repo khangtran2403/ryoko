@@ -23,3 +23,9 @@ coverage.html
 .DS_Store
 Thumbs.db
 
+# Frontend dependencies and build output
+web/node_modules/
+web/dist/
+web/.vite/
+web/*.tsbuildinfo
+

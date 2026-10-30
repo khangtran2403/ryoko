@@ -73,6 +73,7 @@ func newAPIHandler(deps apiDependencies) http.Handler {
 	mux.Handle("GET /admin/email-outbox", adminOnly(deps.adminEmailOutboxHandler.List))
 	mux.Handle("POST /admin/email-outbox/{emailID}/retry", adminOnly(deps.adminEmailOutboxHandler.Retry))
 	mux.Handle("GET /admin/payments", adminOnly(deps.adminPaymentHandler.List))
+	mux.Handle("GET /admin/payments/summary", adminOnly(deps.adminPaymentHandler.Summary))
 	mux.Handle("GET /admin/payments/{paymentID}", adminOnly(deps.adminPaymentHandler.Get))
 	mux.Handle("GET /admin/payments/{paymentID}/refund-attempts", adminOnly(deps.adminPaymentHandler.ListRefundAttempts))
 	mux.Handle("POST /admin/payments/{paymentID}/retry-refund", adminOnly(deps.adminPaymentHandler.RetryRefund))

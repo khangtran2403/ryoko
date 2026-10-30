@@ -13,6 +13,7 @@ import (
 
 type adminPaymentService interface {
 	ListPayments(context.Context, payments.ListAdminPaymentsInput) (payments.ListAdminPaymentsResult, error)
+	GetOperationsSummary(context.Context) (payments.AdminPaymentOperationsSummary, error)
 	ListRefundAttempts(context.Context, payments.ListAdminRefundAttemptsInput) (payments.ListAdminRefundAttemptsResult, error)
 	GetPayment(context.Context, int64) (payments.AdminPayment, error)
 	RetryFailedRefund(context.Context, int64) (payments.AdminPayment, error)
@@ -73,6 +74,37 @@ type AdminRefundAttemptResponse struct {
 type ListAdminRefundAttemptsResponse struct {
 	Attempts   []AdminRefundAttemptResponse    `json:"attempts"`
 	Pagination payments.AdminPaymentPagination `json:"pagination"`
+}
+
+type AdminPaymentStatusCountsResponse struct {
+	Pending       int64 `json:"pending"`
+	Succeeded     int64 `json:"succeeded"`
+	Expired       int64 `json:"expired"`
+	RefundPending int64 `json:"refund_pending"`
+	Refunded      int64 `json:"refunded"`
+}
+
+type AdminRefundQueueSummaryResponse struct {
+	Ready           int64      `json:"ready"`
+	Delayed         int64      `json:"delayed"`
+	Leased          int64      `json:"leased"`
+	Failed          int64      `json:"failed"`
+	OldestPendingAt *time.Time `json:"oldest_pending_at"`
+}
+
+type AdminPaymentCurrencyTotalResponse struct {
+	Currency            string `json:"currency"`
+	PaidCount           int64  `json:"paid_count"`
+	PaidAmountMinor     int64  `json:"paid_amount_minor"`
+	RefundedCount       int64  `json:"refunded_count"`
+	RefundedAmountMinor int64  `json:"refunded_amount_minor"`
+}
+
+type AdminPaymentOperationsSummaryResponse struct {
+	PaymentCounts          AdminPaymentStatusCountsResponse    `json:"payment_counts"`
+	RefundQueue            AdminRefundQueueSummaryResponse     `json:"refund_queue"`
+	CurrencyTotals         []AdminPaymentCurrencyTotalResponse `json:"currency_totals"`
+	OldestPendingPaymentAt *time.Time                          `json:"oldest_pending_payment_at"`
 }
 
 func (h *AdminPaymentHandler) List(w http.ResponseWriter, r *http.Request) {
@@ -137,6 +169,43 @@ func (h *AdminPaymentHandler) List(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, ListAdminPaymentsResponse{
 		Payments: response, Pagination: result.Pagination,
+	})
+}
+
+func (h *AdminPaymentHandler) Summary(w http.ResponseWriter, r *http.Request) {
+	summary, err := h.service.GetOperationsSummary(r.Context())
+	if err != nil {
+		http.Error(w, "Failed to get payment operations summary", http.StatusInternalServerError)
+		return
+	}
+
+	currencyTotals := make([]AdminPaymentCurrencyTotalResponse, len(summary.CurrencyTotals))
+	for index, total := range summary.CurrencyTotals {
+		currencyTotals[index] = AdminPaymentCurrencyTotalResponse{
+			Currency: total.Currency, PaidCount: total.PaidCount,
+			PaidAmountMinor: total.PaidAmountMinor, RefundedCount: total.RefundedCount,
+			RefundedAmountMinor: total.RefundedAmountMinor,
+		}
+	}
+	writeJSON(w, http.StatusOK, AdminPaymentOperationsSummaryResponse{
+		PaymentCounts: AdminPaymentStatusCountsResponse{
+			Pending: summary.PaymentCounts.Pending, Succeeded: summary.PaymentCounts.Succeeded,
+			Expired: summary.PaymentCounts.Expired, RefundPending: summary.PaymentCounts.RefundPending,
+			Refunded: summary.PaymentCounts.Refunded,
+		},
+		RefundQueue: AdminRefundQueueSummaryResponse{
+			Ready: summary.RefundQueue.Ready, Delayed: summary.RefundQueue.Delayed,
+			Leased: summary.RefundQueue.Leased, Failed: summary.RefundQueue.Failed,
+			OldestPendingAt: optionalPaymentTime(
+				summary.RefundQueue.OldestPendingAt.Valid,
+				summary.RefundQueue.OldestPendingAt.Time,
+			),
+		},
+		CurrencyTotals: currencyTotals,
+		OldestPendingPaymentAt: optionalPaymentTime(
+			summary.OldestPendingPaymentAt.Valid,
+			summary.OldestPendingPaymentAt.Time,
+		),
 	})
 }
 

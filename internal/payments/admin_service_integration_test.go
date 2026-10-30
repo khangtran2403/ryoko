@@ -17,7 +17,8 @@ func TestAdminPaymentServicePostgreSQLIntegration(t *testing.T) {
 	newBookingID, newPaymentID, newProviderPaymentID := insertPaymentWebhookFixture(t, pool, 15*time.Minute)
 	if _, err := pool.Exec(ctx, `
 		UPDATE payments
-		SET created_at = now() - interval '2 hours', updated_at = now() - interval '2 hours'
+		SET status = 'succeeded', currency = 'USD', paid_at = now() - interval '2 hours',
+		    created_at = now() - interval '2 hours', updated_at = now() - interval '2 hours'
 		WHERE id = $1`, oldPaymentID); err != nil {
 		t.Fatalf("age old payment: %v", err)
 	}
@@ -31,6 +32,19 @@ func TestAdminPaymentServicePostgreSQLIntegration(t *testing.T) {
 	}
 
 	service := NewAdminService(sqlc.New(pool))
+	summary, err := service.GetOperationsSummary(ctx)
+	if err != nil {
+		t.Fatalf("GetOperationsSummary() error = %v", err)
+	}
+	if summary.PaymentCounts.Succeeded != 1 || summary.PaymentCounts.RefundPending != 1 ||
+		summary.RefundQueue.Ready != 0 || summary.RefundQueue.Delayed != 1 ||
+		summary.RefundQueue.Leased != 0 || summary.RefundQueue.Failed != 1 ||
+		!summary.RefundQueue.OldestPendingAt.Valid || summary.OldestPendingPaymentAt.Valid ||
+		len(summary.CurrencyTotals) != 2 || summary.CurrencyTotals[0].Currency != "USD" ||
+		summary.CurrencyTotals[0].PaidAmountMinor != 100 ||
+		summary.CurrencyTotals[1].Currency != "VND" || summary.CurrencyTotals[1].PaidAmountMinor != 100 {
+		t.Errorf("operations summary = %+v", summary)
+	}
 	status, provider := "refund_pending", "fake"
 	result, err := service.ListPayments(ctx, ListAdminPaymentsInput{
 		Status: &status, Provider: &provider, BookingID: &newBookingID, Page: 1, PageSize: 1,
@@ -135,6 +149,15 @@ func TestAdminPaymentServicePostgreSQLIntegration(t *testing.T) {
 	_, err = service.RetryFailedRefund(ctx, oldPaymentID)
 	if !errors.Is(err, ErrAdminRefundInProgress) {
 		t.Fatalf("active refund retry error = %v, want ErrAdminRefundInProgress", err)
+	}
+	summary, err = service.GetOperationsSummary(ctx)
+	if err != nil {
+		t.Fatalf("GetOperationsSummary(after retry) error = %v", err)
+	}
+	if summary.PaymentCounts.RefundPending != 2 || summary.RefundQueue.Ready != 1 ||
+		summary.RefundQueue.Delayed != 0 || summary.RefundQueue.Leased != 1 ||
+		summary.RefundQueue.Failed != 1 {
+		t.Errorf("operations summary after retry = %+v", summary)
 	}
 
 	_, err = service.GetPayment(ctx, 999999)

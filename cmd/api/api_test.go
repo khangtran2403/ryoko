@@ -119,6 +119,7 @@ func TestNewAPIHandlerProtectsAdminPaymentRoutes(t *testing.T) {
 		path   string
 	}{
 		{method: http.MethodGet, path: "/admin/payments"},
+		{method: http.MethodGet, path: "/admin/payments/summary"},
 		{method: http.MethodGet, path: "/admin/payments/1"},
 		{method: http.MethodGet, path: "/admin/payments/1/refund-attempts"},
 		{method: http.MethodPost, path: "/admin/payments/1/retry-refund"},

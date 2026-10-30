@@ -30,6 +30,8 @@ var (
 
 type adminPaymentQueries interface {
 	ListPaymentsForAdmin(context.Context, sqlc.ListPaymentsForAdminParams) ([]sqlc.ListPaymentsForAdminRow, error)
+	GetPaymentOperationsSummaryForAdmin(context.Context) (sqlc.GetPaymentOperationsSummaryForAdminRow, error)
+	ListPaymentCurrencyTotalsForAdmin(context.Context) ([]sqlc.ListPaymentCurrencyTotalsForAdminRow, error)
 	ListPaymentRefundAttemptsForAdmin(context.Context, sqlc.ListPaymentRefundAttemptsForAdminParams) ([]sqlc.PaymentRefundAttempt, error)
 	GetPaymentForAdmin(context.Context, int64) (sqlc.GetPaymentForAdminRow, error)
 	RetryFailedPaymentRefundForAdmin(context.Context, int64) (sqlc.RetryFailedPaymentRefundForAdminRow, error)
@@ -99,6 +101,37 @@ type ListAdminRefundAttemptsInput struct {
 type ListAdminRefundAttemptsResult struct {
 	Attempts   []AdminRefundAttempt
 	Pagination AdminPaymentPagination
+}
+
+type AdminPaymentStatusCounts struct {
+	Pending       int64
+	Succeeded     int64
+	Expired       int64
+	RefundPending int64
+	Refunded      int64
+}
+
+type AdminRefundQueueSummary struct {
+	Ready           int64
+	Delayed         int64
+	Leased          int64
+	Failed          int64
+	OldestPendingAt pgtype.Timestamptz
+}
+
+type AdminPaymentCurrencyTotal struct {
+	Currency            string
+	PaidCount           int64
+	PaidAmountMinor     int64
+	RefundedCount       int64
+	RefundedAmountMinor int64
+}
+
+type AdminPaymentOperationsSummary struct {
+	PaymentCounts          AdminPaymentStatusCounts
+	RefundQueue            AdminRefundQueueSummary
+	CurrencyTotals         []AdminPaymentCurrencyTotal
+	OldestPendingPaymentAt pgtype.Timestamptz
 }
 
 type AdminService struct {
@@ -188,6 +221,43 @@ func (s *AdminService) GetPayment(ctx context.Context, paymentID int64) (AdminPa
 		return AdminPayment{}, fmt.Errorf("get payment for admin: %w", err)
 	}
 	return adminPaymentFromGetRow(row), nil
+}
+
+func (s *AdminService) GetOperationsSummary(
+	ctx context.Context,
+) (AdminPaymentOperationsSummary, error) {
+	operations, err := s.queries.GetPaymentOperationsSummaryForAdmin(ctx)
+	if err != nil {
+		return AdminPaymentOperationsSummary{}, fmt.Errorf("get payment operations summary for admin: %w", err)
+	}
+	currencyRows, err := s.queries.ListPaymentCurrencyTotalsForAdmin(ctx)
+	if err != nil {
+		return AdminPaymentOperationsSummary{}, fmt.Errorf("list payment currency totals for admin: %w", err)
+	}
+
+	currencyTotals := make([]AdminPaymentCurrencyTotal, len(currencyRows))
+	for index, row := range currencyRows {
+		currencyTotals[index] = AdminPaymentCurrencyTotal{
+			Currency: row.Currency, PaidCount: row.PaidCount,
+			PaidAmountMinor: row.PaidAmountMinor, RefundedCount: row.RefundedCount,
+			RefundedAmountMinor: row.RefundedAmountMinor,
+		}
+	}
+
+	return AdminPaymentOperationsSummary{
+		PaymentCounts: AdminPaymentStatusCounts{
+			Pending: operations.PendingCount, Succeeded: operations.SucceededCount,
+			Expired: operations.ExpiredCount, RefundPending: operations.RefundPendingCount,
+			Refunded: operations.RefundedCount,
+		},
+		RefundQueue: AdminRefundQueueSummary{
+			Ready: operations.RefundsReadyCount, Delayed: operations.RefundsDelayedCount,
+			Leased: operations.RefundsLeasedCount, Failed: operations.RefundsFailedCount,
+			OldestPendingAt: operations.OldestPendingRefundAt,
+		},
+		CurrencyTotals:         currencyTotals,
+		OldestPendingPaymentAt: operations.OldestPendingPaymentAt,
+	}, nil
 }
 
 func (s *AdminService) ListRefundAttempts(

@@ -29,6 +29,26 @@ type fakeAdminPaymentQueries struct {
 	attemptErr    error
 	attemptParams sqlc.ListPaymentRefundAttemptsForAdminParams
 	attemptCalls  int
+	summaryRow    sqlc.GetPaymentOperationsSummaryForAdminRow
+	summaryErr    error
+	summaryCalls  int
+	currencyRows  []sqlc.ListPaymentCurrencyTotalsForAdminRow
+	currencyErr   error
+	currencyCalls int
+}
+
+func (f *fakeAdminPaymentQueries) GetPaymentOperationsSummaryForAdmin(
+	_ context.Context,
+) (sqlc.GetPaymentOperationsSummaryForAdminRow, error) {
+	f.summaryCalls++
+	return f.summaryRow, f.summaryErr
+}
+
+func (f *fakeAdminPaymentQueries) ListPaymentCurrencyTotalsForAdmin(
+	_ context.Context,
+) ([]sqlc.ListPaymentCurrencyTotalsForAdminRow, error) {
+	f.currencyCalls++
+	return f.currencyRows, f.currencyErr
 }
 
 func (f *fakeAdminPaymentQueries) ListPaymentRefundAttemptsForAdmin(
@@ -91,6 +111,66 @@ func TestAdminPaymentServiceListsFilteredPayments(t *testing.T) {
 	}
 	if queries.listParams.ResultLimit != 3 || queries.listParams.ResultOffset != 2 {
 		t.Errorf("pagination params = %+v, want limit 3 offset 2", queries.listParams)
+	}
+}
+
+func TestAdminPaymentServiceGetsOperationsSummary(t *testing.T) {
+	oldestPayment := time.Date(2026, time.October, 29, 8, 0, 0, 0, time.UTC)
+	oldestRefund := oldestPayment.Add(time.Hour)
+	queries := &fakeAdminPaymentQueries{
+		summaryRow: sqlc.GetPaymentOperationsSummaryForAdminRow{
+			PendingCount: 2, SucceededCount: 3, ExpiredCount: 4,
+			RefundPendingCount: 5, RefundedCount: 6,
+			RefundsReadyCount: 1, RefundsDelayedCount: 2,
+			RefundsLeasedCount: 1, RefundsFailedCount: 3,
+			OldestPendingPaymentAt: pgtype.Timestamptz{Time: oldestPayment, Valid: true},
+			OldestPendingRefundAt:  pgtype.Timestamptz{Time: oldestRefund, Valid: true},
+		},
+		currencyRows: []sqlc.ListPaymentCurrencyTotalsForAdminRow{
+			{Currency: "USD", PaidCount: 2, PaidAmountMinor: 5000, RefundedCount: 1, RefundedAmountMinor: 2000},
+			{Currency: "VND", PaidCount: 3, PaidAmountMinor: 9000000, RefundedCount: 2, RefundedAmountMinor: 4000000},
+		},
+	}
+
+	result, err := NewAdminService(queries).GetOperationsSummary(context.Background())
+	if err != nil {
+		t.Fatalf("GetOperationsSummary() error = %v", err)
+	}
+	if result.PaymentCounts.Pending != 2 || result.PaymentCounts.Refunded != 6 ||
+		result.RefundQueue.Ready != 1 || result.RefundQueue.Failed != 3 ||
+		result.RefundQueue.OldestPendingAt.Time != oldestRefund ||
+		result.OldestPendingPaymentAt.Time != oldestPayment || len(result.CurrencyTotals) != 2 ||
+		result.CurrencyTotals[0].Currency != "USD" || result.CurrencyTotals[1].PaidAmountMinor != 9000000 {
+		t.Errorf("summary = %+v", result)
+	}
+	if queries.summaryCalls != 1 || queries.currencyCalls != 1 {
+		t.Errorf("query calls = summary:%d currencies:%d", queries.summaryCalls, queries.currencyCalls)
+	}
+}
+
+func TestAdminPaymentServiceReturnsNonNilEmptyCurrencyTotals(t *testing.T) {
+	result, err := NewAdminService(&fakeAdminPaymentQueries{}).GetOperationsSummary(context.Background())
+	if err != nil {
+		t.Fatalf("GetOperationsSummary() error = %v", err)
+	}
+	if result.CurrencyTotals == nil || len(result.CurrencyTotals) != 0 {
+		t.Fatalf("currency totals = %#v, want non-nil empty slice", result.CurrencyTotals)
+	}
+}
+
+func TestAdminPaymentServiceMapsOperationsSummaryErrors(t *testing.T) {
+	databaseErr := errors.New("database unavailable")
+	queries := &fakeAdminPaymentQueries{summaryErr: databaseErr}
+	_, err := NewAdminService(queries).GetOperationsSummary(context.Background())
+	if !errors.Is(err, databaseErr) || queries.currencyCalls != 0 ||
+		!strings.Contains(err.Error(), "get payment operations summary") {
+		t.Fatalf("summary error = %v; currency calls = %d", err, queries.currencyCalls)
+	}
+
+	queries = &fakeAdminPaymentQueries{currencyErr: databaseErr}
+	_, err = NewAdminService(queries).GetOperationsSummary(context.Background())
+	if !errors.Is(err, databaseErr) || !strings.Contains(err.Error(), "list payment currency totals") {
+		t.Fatalf("currency error = %v", err)
 	}
 }
 

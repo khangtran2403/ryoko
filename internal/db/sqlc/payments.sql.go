@@ -630,6 +630,121 @@ func (q *Queries) GetPaymentForAdmin(ctx context.Context, paymentID int64) (GetP
 	return i, err
 }
 
+const getPaymentOperationsSummaryForAdmin = `-- name: GetPaymentOperationsSummaryForAdmin :one
+SELECT
+    count(*) FILTER (WHERE status = 'pending')::bigint AS pending_count,
+    count(*) FILTER (WHERE status = 'succeeded')::bigint AS succeeded_count,
+    count(*) FILTER (WHERE status = 'expired')::bigint AS expired_count,
+    count(*) FILTER (WHERE status = 'refund_pending')::bigint AS refund_pending_count,
+    count(*) FILTER (WHERE status = 'refunded')::bigint AS refunded_count,
+    count(*) FILTER (
+        WHERE status = 'refund_pending'
+          AND refund_locked_at IS NULL
+          AND refund_available_at <= now()
+    )::bigint AS refunds_ready_count,
+    count(*) FILTER (
+        WHERE status = 'refund_pending'
+          AND refund_locked_at IS NULL
+          AND refund_available_at > now()
+    )::bigint AS refunds_delayed_count,
+    count(*) FILTER (
+        WHERE status = 'refund_pending'
+          AND refund_locked_at IS NOT NULL
+    )::bigint AS refunds_leased_count,
+    count(*) FILTER (
+        WHERE status = 'refund_pending'
+          AND failure_code IS NOT NULL
+    )::bigint AS refunds_failed_count,
+    (min(created_at) FILTER (WHERE status = 'pending'))::timestamptz AS oldest_pending_payment_at,
+    (min(refund_available_at) FILTER (WHERE status = 'refund_pending'))::timestamptz AS oldest_pending_refund_at
+FROM payments
+`
+
+type GetPaymentOperationsSummaryForAdminRow struct {
+	PendingCount           int64              `json:"pending_count"`
+	SucceededCount         int64              `json:"succeeded_count"`
+	ExpiredCount           int64              `json:"expired_count"`
+	RefundPendingCount     int64              `json:"refund_pending_count"`
+	RefundedCount          int64              `json:"refunded_count"`
+	RefundsReadyCount      int64              `json:"refunds_ready_count"`
+	RefundsDelayedCount    int64              `json:"refunds_delayed_count"`
+	RefundsLeasedCount     int64              `json:"refunds_leased_count"`
+	RefundsFailedCount     int64              `json:"refunds_failed_count"`
+	OldestPendingPaymentAt pgtype.Timestamptz `json:"oldest_pending_payment_at"`
+	OldestPendingRefundAt  pgtype.Timestamptz `json:"oldest_pending_refund_at"`
+}
+
+func (q *Queries) GetPaymentOperationsSummaryForAdmin(ctx context.Context) (GetPaymentOperationsSummaryForAdminRow, error) {
+	row := q.db.QueryRow(ctx, getPaymentOperationsSummaryForAdmin)
+	var i GetPaymentOperationsSummaryForAdminRow
+	err := row.Scan(
+		&i.PendingCount,
+		&i.SucceededCount,
+		&i.ExpiredCount,
+		&i.RefundPendingCount,
+		&i.RefundedCount,
+		&i.RefundsReadyCount,
+		&i.RefundsDelayedCount,
+		&i.RefundsLeasedCount,
+		&i.RefundsFailedCount,
+		&i.OldestPendingPaymentAt,
+		&i.OldestPendingRefundAt,
+	)
+	return i, err
+}
+
+const listPaymentCurrencyTotalsForAdmin = `-- name: ListPaymentCurrencyTotalsForAdmin :many
+SELECT
+    currency,
+    count(*) FILTER (WHERE paid_at IS NOT NULL)::bigint AS paid_count,
+    COALESCE(
+        sum(amount_minor) FILTER (WHERE paid_at IS NOT NULL),
+        0
+    )::bigint AS paid_amount_minor,
+    count(*) FILTER (WHERE status = 'refunded')::bigint AS refunded_count,
+    COALESCE(
+        sum(amount_minor) FILTER (WHERE status = 'refunded'),
+        0
+    )::bigint AS refunded_amount_minor
+FROM payments
+GROUP BY currency
+ORDER BY currency
+`
+
+type ListPaymentCurrencyTotalsForAdminRow struct {
+	Currency            string `json:"currency"`
+	PaidCount           int64  `json:"paid_count"`
+	PaidAmountMinor     int64  `json:"paid_amount_minor"`
+	RefundedCount       int64  `json:"refunded_count"`
+	RefundedAmountMinor int64  `json:"refunded_amount_minor"`
+}
+
+func (q *Queries) ListPaymentCurrencyTotalsForAdmin(ctx context.Context) ([]ListPaymentCurrencyTotalsForAdminRow, error) {
+	rows, err := q.db.Query(ctx, listPaymentCurrencyTotalsForAdmin)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListPaymentCurrencyTotalsForAdminRow
+	for rows.Next() {
+		var i ListPaymentCurrencyTotalsForAdminRow
+		if err := rows.Scan(
+			&i.Currency,
+			&i.PaidCount,
+			&i.PaidAmountMinor,
+			&i.RefundedCount,
+			&i.RefundedAmountMinor,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listPaymentRefundAttemptsForAdmin = `-- name: ListPaymentRefundAttemptsForAdmin :many
 SELECT
     id,

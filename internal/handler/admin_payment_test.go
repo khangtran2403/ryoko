@@ -27,6 +27,16 @@ type fakeAdminPaymentService struct {
 	attemptResult payments.ListAdminRefundAttemptsResult
 	attemptErr    error
 	attemptInput  payments.ListAdminRefundAttemptsInput
+	summaryResult payments.AdminPaymentOperationsSummary
+	summaryErr    error
+	summaryCalls  int
+}
+
+func (f *fakeAdminPaymentService) GetOperationsSummary(
+	_ context.Context,
+) (payments.AdminPaymentOperationsSummary, error) {
+	f.summaryCalls++
+	return f.summaryResult, f.summaryErr
 }
 
 func (f *fakeAdminPaymentService) ListRefundAttempts(
@@ -103,6 +113,54 @@ func TestAdminPaymentHandlerListsPayments(t *testing.T) {
 		*body.Payments[0].ProviderPaymentID != "pi_123" || body.Payments[0].FailureCode == nil ||
 		body.Payments[0].RefundAttempts != 2 || body.Payments[0].RefundAvailableAt == nil {
 		t.Errorf("response = %+v", body)
+	}
+}
+
+func TestAdminPaymentHandlerGetsOperationsSummary(t *testing.T) {
+	oldestPayment := time.Date(2026, time.October, 29, 8, 0, 0, 0, time.UTC)
+	oldestRefund := oldestPayment.Add(time.Hour)
+	service := &fakeAdminPaymentService{summaryResult: payments.AdminPaymentOperationsSummary{
+		PaymentCounts: payments.AdminPaymentStatusCounts{
+			Pending: 2, Succeeded: 3, Expired: 4, RefundPending: 5, Refunded: 6,
+		},
+		RefundQueue: payments.AdminRefundQueueSummary{
+			Ready: 1, Delayed: 2, Leased: 1, Failed: 3,
+			OldestPendingAt: pgtype.Timestamptz{Time: oldestRefund, Valid: true},
+		},
+		CurrencyTotals: []payments.AdminPaymentCurrencyTotal{
+			{Currency: "USD", PaidCount: 2, PaidAmountMinor: 5000, RefundedCount: 1, RefundedAmountMinor: 2000},
+			{Currency: "VND", PaidCount: 3, PaidAmountMinor: 9000000, RefundedCount: 2, RefundedAmountMinor: 4000000},
+		},
+		OldestPendingPaymentAt: pgtype.Timestamptz{Time: oldestPayment, Valid: true},
+	}}
+	response := httptest.NewRecorder()
+	NewAdminPaymentHandler(service).Summary(
+		response,
+		httptest.NewRequest(http.MethodGet, "/admin/payments/summary", nil),
+	)
+
+	if response.Code != http.StatusOK || service.summaryCalls != 1 {
+		t.Fatalf("status = %d; calls = %d; body = %s", response.Code, service.summaryCalls, response.Body.String())
+	}
+	var body AdminPaymentOperationsSummaryResponse
+	if err := json.NewDecoder(response.Body).Decode(&body); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if body.PaymentCounts.Pending != 2 || body.PaymentCounts.Refunded != 6 ||
+		body.RefundQueue.Failed != 3 || body.RefundQueue.OldestPendingAt == nil ||
+		body.OldestPendingPaymentAt == nil || len(body.CurrencyTotals) != 2 ||
+		body.CurrencyTotals[0].Currency != "USD" || body.CurrencyTotals[1].Currency != "VND" {
+		t.Errorf("response = %+v", body)
+	}
+}
+
+func TestAdminPaymentHandlerMapsOperationsSummaryError(t *testing.T) {
+	response := httptest.NewRecorder()
+	NewAdminPaymentHandler(&fakeAdminPaymentService{
+		summaryErr: errors.New("database unavailable"),
+	}).Summary(response, httptest.NewRequest(http.MethodGet, "/admin/payments/summary", nil))
+	if response.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500; body = %s", response.Code, response.Body.String())
 	}
 }
 

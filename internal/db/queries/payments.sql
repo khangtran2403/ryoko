@@ -141,6 +141,52 @@ ORDER BY p.created_at DESC, p.id DESC
 LIMIT sqlc.arg(result_limit)::int
 OFFSET sqlc.arg(result_offset)::bigint;
 
+-- name: GetPaymentOperationsSummaryForAdmin :one
+SELECT
+    count(*) FILTER (WHERE status = 'pending')::bigint AS pending_count,
+    count(*) FILTER (WHERE status = 'succeeded')::bigint AS succeeded_count,
+    count(*) FILTER (WHERE status = 'expired')::bigint AS expired_count,
+    count(*) FILTER (WHERE status = 'refund_pending')::bigint AS refund_pending_count,
+    count(*) FILTER (WHERE status = 'refunded')::bigint AS refunded_count,
+    count(*) FILTER (
+        WHERE status = 'refund_pending'
+          AND refund_locked_at IS NULL
+          AND refund_available_at <= now()
+    )::bigint AS refunds_ready_count,
+    count(*) FILTER (
+        WHERE status = 'refund_pending'
+          AND refund_locked_at IS NULL
+          AND refund_available_at > now()
+    )::bigint AS refunds_delayed_count,
+    count(*) FILTER (
+        WHERE status = 'refund_pending'
+          AND refund_locked_at IS NOT NULL
+    )::bigint AS refunds_leased_count,
+    count(*) FILTER (
+        WHERE status = 'refund_pending'
+          AND failure_code IS NOT NULL
+    )::bigint AS refunds_failed_count,
+    (min(created_at) FILTER (WHERE status = 'pending'))::timestamptz AS oldest_pending_payment_at,
+    (min(refund_available_at) FILTER (WHERE status = 'refund_pending'))::timestamptz AS oldest_pending_refund_at
+FROM payments;
+
+-- name: ListPaymentCurrencyTotalsForAdmin :many
+SELECT
+    currency,
+    count(*) FILTER (WHERE paid_at IS NOT NULL)::bigint AS paid_count,
+    COALESCE(
+        sum(amount_minor) FILTER (WHERE paid_at IS NOT NULL),
+        0
+    )::bigint AS paid_amount_minor,
+    count(*) FILTER (WHERE status = 'refunded')::bigint AS refunded_count,
+    COALESCE(
+        sum(amount_minor) FILTER (WHERE status = 'refunded'),
+        0
+    )::bigint AS refunded_amount_minor
+FROM payments
+GROUP BY currency
+ORDER BY currency;
+
 -- name: GetPaymentForAdmin :one
 SELECT
     p.id,
